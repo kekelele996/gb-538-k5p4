@@ -74,6 +74,9 @@ func OpenDatabase(config Config) (*gorm.DB, error) {
 	); err != nil {
 		return nil, fmt.Errorf("migrate database: %w", err)
 	}
+	if err := enforceAttributionInputUniqueness(db); err != nil {
+		return nil, fmt.Errorf("migrate attribution input index: %w", err)
+	}
 	if err := seedDatabase(db); err != nil {
 		return nil, fmt.Errorf("seed database: %w", err)
 	}
@@ -344,4 +347,18 @@ func Ping(ctx context.Context, db *gorm.DB) error {
 		return err
 	}
 	return sqlDB.PingContext(ctx)
+}
+
+// enforceAttributionInputUniqueness 将早期版本的 input_hash + algorithm_version
+// 复合唯一索引替换为“仅未失效运行”的部分唯一索引：失效后的旧输入必须允许重新计算，
+// 但同一冻结输入在存在有效结果时仍然幂等复用。
+func enforceAttributionInputUniqueness(db *gorm.DB) error {
+	if err := db.Exec("DROP INDEX IF EXISTS idx_run_input_version").Error; err != nil {
+		return err
+	}
+	return db.Exec(
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_run_input_active " +
+			"ON attribution_runs (input_hash, algorithm_version) " +
+			"WHERE attribution_state <> 'invalidated'",
+	).Error
 }

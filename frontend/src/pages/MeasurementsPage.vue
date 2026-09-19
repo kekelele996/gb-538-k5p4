@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { AudioLines, FileUp, RefreshCw } from '@lucide/vue'
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import AppShell from '../components/common/AppShell.vue'
 import OctaveBandChart from '../components/common/OctaveBandChart.vue'
 import PageHeader from '../components/common/PageHeader.vue'
@@ -45,8 +45,21 @@ async function importMeasurement() {
 
 async function transition(toState: MeasurementState) {
   if (!selected.value) return
-  try { selected.value = await store.transition(selected.value, toState); ElMessage.success(`状态已更新为${measurementStateLabels[toState]}`) }
-  catch (error) { ElMessage.error(errorMessage(error)) }
+  if (toState === 'superseded') {
+    try {
+      await ElMessageBox.confirm(
+        '将该测量标记为“被替代”后，冻结了它的未确认归因运行将在同一事务内自动转为“已失效”，并记录触发来源；已确认结果不受影响。',
+        '替代测量将级联失效归因结果',
+        { confirmButtonText: '标记替代并失效相关运行', cancelButtonText: '取消', type: 'warning' },
+      )
+    } catch {
+      return
+    }
+  }
+  try {
+    selected.value = await store.transition(selected.value, toState)
+    ElMessage.success(toState === 'superseded' ? '测量已标记为被替代，相关未确认归因运行已失效' : `状态已更新为${measurementStateLabels[toState]}`)
+  } catch (error) { ElMessage.error(errorMessage(error)) }
 }
 </script>
 

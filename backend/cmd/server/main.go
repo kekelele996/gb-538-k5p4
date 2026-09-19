@@ -50,11 +50,13 @@ func run(logger *slog.Logger) error {
 	sourceRepository := repository.NewSourceProfileRepository(db)
 	runRepository := repository.NewAttributionRunRepository(db)
 	supportRepository := repository.NewSupportRepository(db)
+	transactor := repository.NewTransactor(db)
+	invalidationService := service.NewFrozenInputInvalidationService(transactor)
 
-	pointHandler := handler.NewMonitoringPointHandler(service.NewMonitoringPointService(pointRepository))
-	measurementHandler := handler.NewNoiseMeasurementHandler(service.NewNoiseMeasurementService(measurementRepository, pointRepository))
-	sourceHandler := handler.NewSourceProfileHandler(service.NewSourceProfileService(sourceRepository))
-	runHandler := handler.NewAttributionRunHandler(service.NewAttributionRunService(runRepository, measurementRepository, sourceRepository))
+	pointHandler := handler.NewMonitoringPointHandler(service.NewMonitoringPointService(pointRepository, transactor, invalidationService))
+	measurementHandler := handler.NewNoiseMeasurementHandler(service.NewNoiseMeasurementService(measurementRepository, pointRepository, transactor, invalidationService))
+	sourceHandler := handler.NewSourceProfileHandler(service.NewSourceProfileService(sourceRepository, transactor, invalidationService))
+	runHandler := handler.NewAttributionRunHandler(service.NewAttributionRunService(runRepository, measurementRepository, sourceRepository, transactor))
 	supportHandler := handler.NewSupportHandler(service.NewAccessService(supportRepository, configuration.JWTSecret, configuration.JWTExpiry))
 
 	authenticator := middleware.NewAuthenticator(configuration.JWTSecret)

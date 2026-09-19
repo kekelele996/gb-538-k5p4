@@ -44,6 +44,18 @@ type AttributionEvidence struct {
 	ElapsedMillis   int64    `json:"elapsed_millis"`
 }
 
+// RunInvalidation 描述未确认运行被冻结输入变化级联失效时的触发来源与时间。
+type RunInvalidation struct {
+	ReasonCode        string     `json:"reason_code"`
+	Reason            string     `json:"reason"`
+	TriggerType       string     `json:"trigger_entity_type"`
+	TriggerID         uint       `json:"trigger_entity_id"`
+	TriggerCode       string     `json:"trigger_entity_code"`
+	InvalidatedBy     uint       `json:"invalidated_by"`
+	InvalidatedByName string     `json:"invalidated_by_name"`
+	InvalidatedAt     *time.Time `json:"invalidated_at"`
+}
+
 type AttributionRunResponse struct {
 	ID               uint                 `json:"id"`
 	RunCode          string               `json:"run_code"`
@@ -63,6 +75,7 @@ type AttributionRunResponse struct {
 	CreatedBy        uint                 `json:"created_by"`
 	ReviewedBy       *uint                `json:"reviewed_by"`
 	ReviewNote       string               `json:"review_note"`
+	Invalidation     *RunInvalidation     `json:"invalidation,omitempty"`
 	Version          uint                 `json:"version"`
 	CreatedAt        time.Time            `json:"created_at"`
 	UpdatedAt        time.Time            `json:"updated_at"`

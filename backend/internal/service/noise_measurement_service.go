@@ -6,6 +6,8 @@ import (
 	"math"
 	"time"
 
+	"gorm.io/gorm"
+
 	"industrial-noise-source-attribution/backend/internal/algorithm"
 	"industrial-noise-source-attribution/backend/internal/constants"
 	"industrial-noise-source-attribution/backend/internal/dto"
@@ -17,10 +19,12 @@ import (
 type NoiseMeasurementService struct {
 	repository      *repository.NoiseMeasurementRepository
 	pointRepository *repository.MonitoringPointRepository
+	transactor      *repository.Transactor
+	invalidation    *FrozenInputInvalidationService
 }
 
-func NewNoiseMeasurementService(repo *repository.NoiseMeasurementRepository, pointRepo *repository.MonitoringPointRepository) *NoiseMeasurementService {
-	return &NoiseMeasurementService{repository: repo, pointRepository: pointRepo}
+func NewNoiseMeasurementService(repo *repository.NoiseMeasurementRepository, pointRepo *repository.MonitoringPointRepository, transactor *repository.Transactor, invalidation *FrozenInputInvalidationService) *NoiseMeasurementService {
+	return &NoiseMeasurementService{repository: repo, pointRepository: pointRepo, transactor: transactor, invalidation: invalidation}
 }
 
 func (s *NoiseMeasurementService) List(ctx context.Context) ([]dto.NoiseMeasurementResponse, error) {
@@ -133,8 +137,37 @@ func (s *NoiseMeasurementService) Transition(ctx context.Context, id uint, reque
 	if quality != "" {
 		after.MeasurementQuality, after.QualityReason = quality, reason
 	}
-	audit := newAudit(actor, "noise_measurement.state_changed", "NoiseMeasurement", id, before, after, map[string]any{"from": from, "to": to, "expected_version": request.Version})
-	if err := s.repository.Transition(ctx, id, request.Version, string(from), string(to), quality, reason, audit); err != nil {
+	err = s.transactor.InTx(ctx, func(tx *gorm.DB) error {
+		if txErr := repository.TransitionMeasurementOnlyTx(tx, id, request.Version, string(from), string(to), quality, reason); txErr != nil {
+			return txErr
+		}
+		invalidatedRunIDs := []uint{}
+		invalidationReasonCode := ""
+		if to == constants.MeasurementSuperseded {
+			scope := InvalidationScope{
+				ReasonCode: constants.InvalidationReasonMeasurementReplaced,
+				Reason:     constants.InvalidationReasonMessage(constants.InvalidationReasonMeasurementReplaced),
+				EntityType: constants.InvalidationEntityMeasurement, EntityID: id,
+				EntityCode: fmt.Sprintf("CHK-%s", before.SourceChecksum),
+			}
+			ids, invErr := s.invalidation.InvalidateForMeasurementTx(tx, id, scope, actor)
+			if invErr != nil {
+				return invErr
+			}
+			invalidatedRunIDs = ids
+			invalidationReasonCode = string(constants.InvalidationReasonMeasurementReplaced)
+		}
+		audit := newAudit(actor, "noise_measurement.state_changed", "NoiseMeasurement", id, before, after, map[string]any{
+			"from": from, "to": to, "expected_version": request.Version,
+			"invalidation_reason_code": invalidationReasonCode,
+			"invalidated_run_ids":      invalidatedRunIDs,
+		})
+		if txErr := tx.Create(audit).Error; txErr != nil {
+			return fmt.Errorf("audit measurement transition: %w", txErr)
+		}
+		return nil
+	})
+	if err != nil {
 		return dto.NoiseMeasurementResponse{}, mapRepositoryError(err, "噪声测量不存在", "测量状态或版本已变化")
 	}
 	return s.Get(ctx, id)

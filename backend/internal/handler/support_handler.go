@@ -52,7 +52,8 @@ func (h *SupportHandler) Enums(c *gin.Context) {
 		},
 		"attribution_states": []constants.AttributionState{
 			constants.AttributionQueued, constants.AttributionCalculating, constants.AttributionCompleted,
-			constants.AttributionFailed, constants.AttributionReviewed, constants.AttributionConfirmed, constants.AttributionVoided,
+			constants.AttributionFailed, constants.AttributionReviewed, constants.AttributionConfirmed,
+			constants.AttributionVoided, constants.AttributionInvalidated,
 		},
 		"roles": constants.Roles, "algorithm_version": constants.AlgorithmVersion,
 	})

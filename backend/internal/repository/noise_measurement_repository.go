@@ -70,25 +70,49 @@ func (r *NoiseMeasurementRepository) Create(ctx context.Context, measurement *mo
 
 func (r *NoiseMeasurementRepository) Transition(ctx context.Context, id, expectedVersion uint, from, to, quality, reason string, audit *model.AuditLog) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		updates := map[string]any{
-			"measurement_state": to, "version": gorm.Expr("version + 1"), "updated_at": time.Now().UTC(),
-		}
-		if quality != "" {
-			updates["measurement_quality"] = quality
-			updates["quality_reason"] = reason
-		}
-		result := tx.Model(&model.NoiseMeasurement{}).
-			Where("id = ? AND version = ? AND measurement_state = ?", id, expectedVersion, from).
-			Updates(updates)
-		if result.Error != nil {
-			return fmt.Errorf("transition noise measurement: %w", result.Error)
-		}
-		if result.RowsAffected != 1 {
-			return gorm.ErrInvalidData
-		}
-		if err := tx.Create(audit).Error; err != nil {
-			return fmt.Errorf("audit measurement transition: %w", err)
-		}
-		return nil
+		return TransitionMeasurementTx(tx, id, expectedVersion, from, to, quality, reason, audit)
 	})
+}
+
+// MeasurementIDsByPointTx 在事务内返回某监测点下的全部测量 ID，
+// 供监测点坐标/背景谱更新或停用时匹配受冻结的归因运行。
+func MeasurementIDsByPointTx(tx *gorm.DB, pointID uint) ([]uint, error) {
+	var ids []uint
+	if err := tx.Model(&model.NoiseMeasurement{}).Where("monitoring_point_id = ?", pointID).
+		Pluck("id", &ids).Error; err != nil {
+		return nil, fmt.Errorf("load measurement ids by point: %w", err)
+	}
+	return ids, nil
+}
+
+// TransitionMeasurementTx 在调用方事务内执行测量条件状态迁移并写入审计。
+func TransitionMeasurementTx(tx *gorm.DB, id, expectedVersion uint, from, to, quality, reason string, audit *model.AuditLog) error {
+	if err := TransitionMeasurementOnlyTx(tx, id, expectedVersion, from, to, quality, reason); err != nil {
+		return err
+	}
+	if err := tx.Create(audit).Error; err != nil {
+		return fmt.Errorf("audit measurement transition: %w", err)
+	}
+	return nil
+}
+
+// TransitionMeasurementOnlyTx 仅做测量条件状态迁移，审计由调用方在同事务内补充写入。
+func TransitionMeasurementOnlyTx(tx *gorm.DB, id, expectedVersion uint, from, to, quality, reason string) error {
+	updates := map[string]any{
+		"measurement_state": to, "version": gorm.Expr("version + 1"), "updated_at": time.Now().UTC(),
+	}
+	if quality != "" {
+		updates["measurement_quality"] = quality
+		updates["quality_reason"] = reason
+	}
+	result := tx.Model(&model.NoiseMeasurement{}).
+		Where("id = ? AND version = ? AND measurement_state = ?", id, expectedVersion, from).
+		Updates(updates)
+	if result.Error != nil {
+		return fmt.Errorf("transition noise measurement: %w", result.Error)
+	}
+	if result.RowsAffected != 1 {
+		return gorm.ErrInvalidData
+	}
+	return nil
 }

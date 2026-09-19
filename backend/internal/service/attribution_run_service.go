@@ -22,10 +22,11 @@ type AttributionRunService struct {
 	repository            *repository.AttributionRunRepository
 	measurementRepository *repository.NoiseMeasurementRepository
 	sourceRepository      *repository.SourceProfileRepository
+	transactor            *repository.Transactor
 }
 
-func NewAttributionRunService(runRepo *repository.AttributionRunRepository, measurementRepo *repository.NoiseMeasurementRepository, sourceRepo *repository.SourceProfileRepository) *AttributionRunService {
-	return &AttributionRunService{repository: runRepo, measurementRepository: measurementRepo, sourceRepository: sourceRepo}
+func NewAttributionRunService(runRepo *repository.AttributionRunRepository, measurementRepo *repository.NoiseMeasurementRepository, sourceRepo *repository.SourceProfileRepository, transactor *repository.Transactor) *AttributionRunService {
+	return &AttributionRunService{repository: runRepo, measurementRepository: measurementRepo, sourceRepository: sourceRepo, transactor: transactor}
 }
 
 func (s *AttributionRunService) List(ctx context.Context) ([]dto.AttributionRunResponse, error) {
@@ -88,7 +89,7 @@ func (s *AttributionRunService) Create(ctx context.Context, request dto.CreateAt
 	if err != nil {
 		return dto.AttributionRunResponse{}, false, err
 	}
-	if existing, findErr := s.repository.FindByInput(ctx, inputHash, constants.AlgorithmVersion); findErr == nil {
+	if existing, findErr := s.repository.FindActiveByInput(ctx, inputHash, constants.AlgorithmVersion); findErr == nil {
 		response, responseErr := attributionResponse(existing)
 		return response, true, responseErr
 	} else if !repository.IsNotFound(findErr) && !strings.Contains(findErr.Error(), gorm.ErrRecordNotFound.Error()) {
@@ -98,9 +99,25 @@ func (s *AttributionRunService) Create(ctx context.Context, request dto.CreateAt
 	if err != nil {
 		return dto.AttributionRunResponse{}, false, util.Validation("归因算法无法处理当前冻结输入", err)
 	}
+	// 重新计算时收集该输入的历史失效运行 ID，写入完成审计，保留“失效 -> 重算”完整链路。
+	// 同一 input_hash 的失效运行直接命中；坐标/背景谱变化导致 hash 变化时，
+	// 再按相同冻结 ID 集合补链。
+	byHash, err := s.repository.ListInvalidatedByInput(ctx, inputHash, constants.AlgorithmVersion)
+	if err != nil {
+		return dto.AttributionRunResponse{}, false, err
+	}
+	byFrozenIDs, err := s.repository.ListInvalidatedByFrozenIDs(ctx, mustJSON(measurementIDs), mustJSON(sourceIDs))
+	if err != nil {
+		return dto.AttributionRunResponse{}, false, err
+	}
+	priorInvalidated := mergeRunsByID(byHash, byFrozenIDs)
+	inputRunCount, err := s.repository.CountByInput(ctx, inputHash, constants.AlgorithmVersion)
+	if err != nil {
+		return dto.AttributionRunResponse{}, false, err
+	}
 	finished := time.Now().UTC()
 	run := model.AttributionRun{
-		RunCode:            "AR-" + strings.ToUpper(inputHash[:10]),
+		RunCode:            buildRunCode(inputHash, inputRunCount),
 		MeasurementIDsJSON: mustJSON(measurementIDs), SourceProfileIDsJSON: mustJSON(sourceIDs),
 		AlgorithmVersion: constants.AlgorithmVersion, InputHash: inputHash,
 		InputSnapshotJSON: string(snapshotJSON), NormalizedBandsJSON: mustJSON(result.NormalizedBands),
@@ -114,9 +131,16 @@ func (s *AttributionRunService) Create(ctx context.Context, request dto.CreateAt
 		"idempotency_key": idempotencyKey, "measurement_checksums": measurementChecksums(measurementInputs),
 		"matrix_rows": result.Evidence.MatrixRows, "matrix_columns": result.Evidence.MatrixColumns,
 		"iterations": result.Evidence.Iterations, "elapsed_millis": result.Evidence.ElapsedMillis,
+		"recomputed_from_invalidated_run_ids": invalidationRunIDs(priorInvalidated),
 	})
-	if err := s.repository.CreateCalculated(ctx, &run, audit); err != nil {
-		if existing, findErr := s.repository.FindByInput(ctx, inputHash, constants.AlgorithmVersion); findErr == nil {
+	if err := s.transactor.InTx(ctx, func(tx *gorm.DB) error {
+		// 事务内再次确认没有有效结果，避免并发重算越过部分唯一索引前的竞态。
+		if _, findErr := repository.FindActiveAttributionByInputTx(tx, inputHash, constants.AlgorithmVersion); findErr == nil {
+			return util.Conflict("相同冻结输入存在有效归因结果", nil)
+		}
+		return repository.CreateCalculatedTx(tx, &run, audit)
+	}); err != nil {
+		if existing, findErr := s.repository.FindActiveByInput(ctx, inputHash, constants.AlgorithmVersion); findErr == nil {
 			response, responseErr := attributionResponse(existing)
 			return response, true, responseErr
 		}
@@ -124,6 +148,39 @@ func (s *AttributionRunService) Create(ctx context.Context, request dto.CreateAt
 	}
 	response, err := s.Get(ctx, run.ID)
 	return response, false, err
+}
+
+// buildRunCode 为同一输入的多次计算（含失效后重算）生成不冲突的运行编号。
+func buildRunCode(inputHash string, priorCount int64) string {
+	if priorCount == 0 {
+		return "AR-" + strings.ToUpper(inputHash[:10])
+	}
+	return fmt.Sprintf("AR-%s-R%d", strings.ToUpper(inputHash[:10]), priorCount+1)
+}
+
+func invalidationRunIDs(runs []model.AttributionRun) []uint {
+	ids := make([]uint, 0, len(runs))
+	for _, run := range runs {
+		ids = append(ids, run.ID)
+	}
+	return ids
+}
+
+// mergeRunsByID 合并两路历史失效运行并按 ID 去重，保持 ID 升序。
+func mergeRunsByID(lists ...[]model.AttributionRun) []model.AttributionRun {
+	seen := make(map[uint]bool)
+	merged := make([]model.AttributionRun, 0)
+	for _, runs := range lists {
+		for _, run := range runs {
+			if seen[run.ID] {
+				continue
+			}
+			seen[run.ID] = true
+			merged = append(merged, run)
+		}
+	}
+	sort.Slice(merged, func(i, j int) bool { return merged[i].ID < merged[j].ID })
+	return merged
 }
 
 func (s *AttributionRunService) Review(ctx context.Context, id uint, request dto.ReviewAttributionRequest, actor model.Actor) (dto.AttributionRunResponse, error) {
@@ -134,6 +191,9 @@ func (s *AttributionRunService) Confirm(ctx context.Context, id uint, request dt
 	run, err := s.repository.Get(ctx, id)
 	if err != nil {
 		return dto.AttributionRunResponse{}, mapRepositoryError(err, "归因运行不存在", "归因运行读取冲突")
+	}
+	if constants.AttributionState(run.AttributionState) == constants.AttributionInvalidated {
+		return dto.AttributionRunResponse{}, util.Conflict("归因运行已因冻结输入变化失效，不能确认；请使用当前输入重新计算", nil)
 	}
 	if run.CreatedBy == actor.ID {
 		return dto.AttributionRunResponse{}, util.Forbidden("归因运行发起人不得确认自己的结果")
@@ -179,6 +239,9 @@ func (s *AttributionRunService) transition(ctx context.Context, id, version uint
 
 func (s *AttributionRunService) transitionLoaded(ctx context.Context, run model.AttributionRun, version uint, to constants.AttributionState, note string, actor model.Actor) (dto.AttributionRunResponse, error) {
 	from := constants.AttributionState(run.AttributionState)
+	if from == constants.AttributionInvalidated {
+		return dto.AttributionRunResponse{}, util.Conflict("归因运行已因冻结输入变化失效，复核与确认均被拒绝；请使用当前输入重新计算", nil)
+	}
 	if !constants.CanTransitionAttribution(from, to) {
 		return dto.AttributionRunResponse{}, util.Conflict(fmt.Sprintf("不允许从 %s 迁移到 %s", from, to), nil)
 	}
@@ -260,6 +323,16 @@ func attributionResponse(run model.AttributionRun) (dto.AttributionRunResponse, 
 			return dto.AttributionRunResponse{}, fmt.Errorf("decode stored attribution evidence: %w", err)
 		}
 	}
+	var invalidation *dto.RunInvalidation
+	if run.AttributionState == string(constants.AttributionInvalidated) {
+		invalidation = &dto.RunInvalidation{
+			ReasonCode: run.InvalidationReasonCode, Reason: run.InvalidationReason,
+			TriggerType: run.InvalidationEntityType, TriggerID: run.InvalidationEntityID,
+			TriggerCode:   run.InvalidationEntityCode,
+			InvalidatedBy: run.InvalidatedBy, InvalidatedByName: run.InvalidatedByName,
+			InvalidatedAt: run.InvalidatedAt,
+		}
+	}
 	return dto.AttributionRunResponse{
 		ID: run.ID, RunCode: run.RunCode, MeasurementIDs: measurementIDs, SourceProfileIDs: sourceIDs,
 		AlgorithmVersion: run.AlgorithmVersion, InputHash: run.InputHash,
@@ -267,7 +340,8 @@ func attributionResponse(run model.AttributionRun) (dto.AttributionRunResponse, 
 		Evidence: evidence, ResidualError: run.ResidualError, AttributionState: run.AttributionState,
 		Explanation: run.Explanation, StartedAt: run.StartedAt, FinishedAt: run.FinishedAt,
 		CreatedBy: run.CreatedBy, ReviewedBy: run.ReviewedBy, ReviewNote: run.ReviewNote,
-		Version: run.Version, CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt,
+		Invalidation: invalidation,
+		Version:      run.Version, CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt,
 	}, nil
 }
 

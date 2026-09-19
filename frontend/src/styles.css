@@ -107,7 +107,7 @@ code, .hash-text, .request-code { font-family: "SFMono-Regular", Consolas, monos
 .state-badge.active, .state-badge.ready, .state-badge.confirmed, .quality-badge.valid { color: var(--green-dark); background: var(--green-soft); border-color: #94b5a0; }
 .state-badge.validated, .state-badge.normalized, .state-badge.reviewed { color: #245f67; background: #dfecef; border-color: #8bb4ba; }
 .state-badge.captured, .state-badge.queued, .state-badge.calculating, .state-badge.completed, .state-badge.draft { color: #315f7a; background: var(--blue-soft); border-color: #98b4c4; }
-.state-badge.rejected, .state-badge.failed, .state-badge.voided, .state-badge.retired, .state-badge.inactive, .quality-badge.clipped { color: var(--red); background: var(--red-soft); border-color: #c999a1; }
+.state-badge.rejected, .state-badge.failed, .state-badge.voided, .state-badge.retired, .state-badge.inactive, .state-badge.invalidated, .quality-badge.clipped { color: var(--red); background: var(--red-soft); border-color: #c999a1; }
 .quality-badge.contaminated, .quality-badge.missing { color: var(--amber); background: var(--amber-soft); border-color: #d2b679; }
 
 .quality-band { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 14px 0; background: #f0f4f1; border-top: 3px solid var(--green); }
@@ -263,3 +263,16 @@ code, .hash-text, .request-code { font-family: "SFMono-Regular", Consolas, monos
 @media (pointer: coarse) {
   .entity-row, .nav-link, .el-button { min-height: 44px; }
 }
+
+/* 冻结输入失效闭环 */
+.invalidation-banner { margin-top: 16px; }
+.invalidation-detail p { margin: 0 0 8px; font-size: .7rem; line-height: 1.6; }
+.invalidation-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; margin: 8px 0; background: #e3c2c6; border: 1px solid #e3c2c6; }
+.invalidation-grid > div { min-width: 0; padding: 8px 10px; background: var(--paper); }
+.invalidation-grid dt { color: var(--muted); font-size: .56rem; font-weight: 760; text-transform: uppercase; }
+.invalidation-grid dd { margin: 3px 0 0; overflow-wrap: anywhere; font-size: .66rem; }
+.invalidation-grid code { font-size: .62rem; }
+.invalidation-hint { display: flex; align-items: center; gap: 5px; margin: 6px 0 0; color: #7c3d46; font-size: .64rem; }
+.run-invalidation-alert { margin: 12px 0; }
+.run-invalidation-line { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: .66rem; }
+.run-invalidation-reason { margin: 6px 0 0; font-size: .68rem; line-height: 1.6; }

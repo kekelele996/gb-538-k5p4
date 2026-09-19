@@ -25,3 +25,36 @@ func TestAttributionStateMachine(t *testing.T) {
 		t.Fatal("confirmed result must remain immutable")
 	}
 }
+
+func TestInvalidationEligibility(t *testing.T) {
+	invalidable := []AttributionState{AttributionCompleted, AttributionReviewed}
+	for _, state := range invalidable {
+		if !CanInvalidateAttribution(state) {
+			t.Fatalf("%s runs must be eligible for frozen-input invalidation", state)
+		}
+	}
+	protected := []AttributionState{
+		AttributionQueued, AttributionCalculating, AttributionFailed,
+		AttributionConfirmed, AttributionVoided, AttributionInvalidated,
+	}
+	for _, state := range protected {
+		if CanInvalidateAttribution(state) {
+			t.Fatalf("%s runs must never be cascade-invalidated", state)
+		}
+	}
+	// invalidated 是系统终态，不允许复核/确认/作废等任何人工迁移。
+	if CanTransitionAttribution(AttributionInvalidated, AttributionReviewed) ||
+		CanTransitionAttribution(AttributionInvalidated, AttributionConfirmed) ||
+		CanTransitionAttribution(AttributionInvalidated, AttributionVoided) {
+		t.Fatal("invalidated must be a terminal state for manual transitions")
+	}
+	for _, code := range []InvalidationReasonCode{
+		InvalidationReasonPointCoordinates, InvalidationReasonPointBackground,
+		InvalidationReasonPointInputsChanged, InvalidationReasonPointDeactivated,
+		InvalidationReasonMeasurementReplaced, InvalidationReasonSourceRetired,
+	} {
+		if InvalidationReasonMessage(code) == "" {
+			t.Fatalf("invalidation reason %s must carry a human-readable message", code)
+		}
+	}
+}

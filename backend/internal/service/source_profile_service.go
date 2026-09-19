@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"gorm.io/gorm"
+
 	"industrial-noise-source-attribution/backend/internal/algorithm"
 	"industrial-noise-source-attribution/backend/internal/constants"
 	"industrial-noise-source-attribution/backend/internal/dto"
@@ -14,11 +16,13 @@ import (
 )
 
 type SourceProfileService struct {
-	repository *repository.SourceProfileRepository
+	repository   *repository.SourceProfileRepository
+	transactor   *repository.Transactor
+	invalidation *FrozenInputInvalidationService
 }
 
-func NewSourceProfileService(repo *repository.SourceProfileRepository) *SourceProfileService {
-	return &SourceProfileService{repository: repo}
+func NewSourceProfileService(repo *repository.SourceProfileRepository, transactor *repository.Transactor, invalidation *FrozenInputInvalidationService) *SourceProfileService {
+	return &SourceProfileService{repository: repo, transactor: transactor, invalidation: invalidation}
 }
 
 func (s *SourceProfileService) List(ctx context.Context) ([]dto.SourceProfileResponse, error) {
@@ -82,8 +86,37 @@ func (s *SourceProfileService) Transition(ctx context.Context, id uint, request 
 	}
 	after := before
 	after.ProfileState, after.LockVersion = request.ToState, request.LockVersion+1
-	audit := newAudit(actor, "source_profile.state_changed", "SourceProfile", id, before, after, map[string]any{"from": from, "to": to, "spectrum_version": before.Version})
-	if err := s.repository.Transition(ctx, id, request.LockVersion, string(from), string(to), audit); err != nil {
+	err = s.transactor.InTx(ctx, func(tx *gorm.DB) error {
+		if txErr := repository.TransitionSourceProfileOnlyTx(tx, id, request.LockVersion, string(from), string(to)); txErr != nil {
+			return txErr
+		}
+		invalidatedRunIDs := []uint{}
+		invalidationReasonCode := ""
+		if to == constants.ProfileRetired {
+			scope := InvalidationScope{
+				ReasonCode: constants.InvalidationReasonSourceRetired,
+				Reason:     constants.InvalidationReasonMessage(constants.InvalidationReasonSourceRetired),
+				EntityType: constants.InvalidationEntitySource, EntityID: id,
+				EntityCode: fmt.Sprintf("%s-V%d", before.SourceCode, before.Version),
+			}
+			ids, invErr := s.invalidation.InvalidateForSourceTx(tx, id, scope, actor)
+			if invErr != nil {
+				return invErr
+			}
+			invalidatedRunIDs = ids
+			invalidationReasonCode = string(constants.InvalidationReasonSourceRetired)
+		}
+		audit := newAudit(actor, "source_profile.state_changed", "SourceProfile", id, before, after, map[string]any{
+			"from": from, "to": to, "spectrum_version": before.Version,
+			"invalidation_reason_code": invalidationReasonCode,
+			"invalidated_run_ids":      invalidatedRunIDs,
+		})
+		if txErr := tx.Create(audit).Error; txErr != nil {
+			return fmt.Errorf("audit source profile transition: %w", txErr)
+		}
+		return nil
+	})
+	if err != nil {
 		return dto.SourceProfileResponse{}, mapRepositoryError(err, "声源谱不存在", "声源谱状态或版本已变化")
 	}
 	return s.Get(ctx, id)

@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { Binary, CircleCheck, FileJson, TriangleAlert } from '@lucide/vue'
+import { Binary, CircleCheck, FileJson, Link2Off, TriangleAlert } from '@lucide/vue'
 import { computed } from 'vue'
 import type { AttributionRun } from '../../types/attribution-run'
 import type { Spectrum } from '../../types/common'
-import { fixed, shortHash } from '../../utils/format'
+import { invalidationReasonLabels, invalidationTriggerTypeLabels } from '../../types/enums/invalidation'
+import { fixed, formatDate, shortHash } from '../../utils/format'
 import OctaveBandChart from './OctaveBandChart.vue'
 import StateBadge from './StateBadge.vue'
 
@@ -22,6 +23,9 @@ const contributionSeries = computed(() => props.run?.contributions.map((source, 
   values: Object.fromEntries(source.bands.map((band) => [String(band.band_hz), band.predicted_db])) as Spectrum,
 })) ?? [])
 const renderedSnapshot = computed(() => JSON.stringify(props.snapshot ?? props.run?.input_snapshot ?? {}, null, 2))
+const invalidation = computed(() => props.run?.invalidation ?? null)
+const triggerTypeLabel = computed(() => invalidationTriggerTypeLabels[invalidation.value?.trigger_entity_type ?? ''] ?? invalidation.value?.trigger_entity_type ?? '')
+const reasonLabel = computed(() => invalidationReasonLabels[invalidation.value?.reason_code as keyof typeof invalidationReasonLabels] ?? invalidation.value?.reason_code ?? '')
 </script>
 
 <template>
@@ -32,6 +36,27 @@ const renderedSnapshot = computed(() => JSON.stringify(props.snapshot ?? props.r
     </div>
 
     <template v-if="run">
+      <el-alert
+        v-if="invalidation"
+        type="error"
+        :closable="false"
+        show-icon
+        class="invalidation-banner"
+        :title="`该结果已失效：${reasonLabel}`"
+      >
+        <template #default>
+          <div class="invalidation-detail">
+            <p>{{ invalidation.reason }}</p>
+            <dl class="invalidation-grid">
+              <div><dt>触发来源</dt><dd>{{ triggerTypeLabel }} #{{ invalidation.trigger_entity_id }}<span v-if="invalidation.trigger_entity_code"> · {{ invalidation.trigger_entity_code }}</span></dd></div>
+              <div><dt>失效时间</dt><dd>{{ formatDate(invalidation.invalidated_at) }}</dd></div>
+              <div><dt>触发操作者</dt><dd>{{ invalidation.invalidated_by_name }} (#{{ invalidation.invalidated_by }})</dd></div>
+              <div><dt>原因代码</dt><dd><code>{{ invalidation.reason_code }}</code></dd></div>
+            </dl>
+            <p class="invalidation-hint"><Link2Off :size="13" /> 复核与确认已关闭；请使用当前冻结输入重新计算，失效结果与重算链路保留在审计中心。</p>
+          </div>
+        </template>
+      </el-alert>
       <div class="explanation-lead"><p>{{ run.explanation }}</p></div>
       <dl class="evidence-grid">
         <div><dt>算法版本</dt><dd>{{ run.algorithm_version }}</dd></div>

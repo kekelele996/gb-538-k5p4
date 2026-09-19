@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"gorm.io/gorm"
+
 	"industrial-noise-source-attribution/backend/internal/algorithm"
 	"industrial-noise-source-attribution/backend/internal/constants"
 	"industrial-noise-source-attribution/backend/internal/dto"
@@ -14,11 +16,13 @@ import (
 )
 
 type MonitoringPointService struct {
-	repository *repository.MonitoringPointRepository
+	repository   *repository.MonitoringPointRepository
+	transactor   *repository.Transactor
+	invalidation *FrozenInputInvalidationService
 }
 
-func NewMonitoringPointService(repo *repository.MonitoringPointRepository) *MonitoringPointService {
-	return &MonitoringPointService{repository: repo}
+func NewMonitoringPointService(repo *repository.MonitoringPointRepository, transactor *repository.Transactor, invalidation *FrozenInputInvalidationService) *MonitoringPointService {
+	return &MonitoringPointService{repository: repo, transactor: transactor, invalidation: invalidation}
 }
 
 func (s *MonitoringPointService) List(ctx context.Context) ([]dto.MonitoringPointResponse, error) {
@@ -74,16 +78,65 @@ func (s *MonitoringPointService) Update(ctx context.Context, id uint, request dt
 	if before.PointState != string(constants.PointActive) {
 		return dto.MonitoringPointResponse{}, util.Conflict("已停用监测点不可编辑", nil)
 	}
+	coordinatesChanged := before.XM != request.XM || before.YM != request.YM || before.HeightM != request.HeightM
+	newBackgroundJSON := mustJSON(request.BackgroundProfile)
+	backgroundChanged := before.BackgroundProfileJSON != newBackgroundJSON
+	// 坐标与背景谱同时变化时合并为单一失效原因，保证同事务内只失效一次。
+	invalidationCode := constants.InvalidationReasonCode("")
+	switch {
+	case coordinatesChanged && backgroundChanged:
+		invalidationCode = constants.InvalidationReasonPointInputsChanged
+	case coordinatesChanged:
+		invalidationCode = constants.InvalidationReasonPointCoordinates
+	case backgroundChanged:
+		invalidationCode = constants.InvalidationReasonPointBackground
+	}
 	after := before
 	after.Name, after.XM, after.YM, after.HeightM = request.Name, request.XM, request.YM, request.HeightM
 	after.AreaType, after.OwnerTeam = request.AreaType, request.OwnerTeam
-	after.BackgroundProfileJSON = mustJSON(request.BackgroundProfile)
+	after.BackgroundProfileJSON = newBackgroundJSON
 	after.Version = request.Version + 1
-	audit := newAudit(actor, "monitoring_point.updated", "MonitoringPoint", id, before, after, map[string]any{"expected_version": request.Version})
-	if err := s.repository.Update(ctx, &after, request.Version, audit); err != nil {
+	err = s.transactor.InTx(ctx, func(tx *gorm.DB) error {
+		if txErr := repository.UpdatePointOnlyTx(tx, &after, request.Version); txErr != nil {
+			return txErr
+		}
+		invalidatedRunIDs := []uint{}
+		if invalidationCode != "" {
+			scope := InvalidationScope{
+				ReasonCode: invalidationCode,
+				Reason:     constants.InvalidationReasonMessage(invalidationCode),
+				EntityType: constants.InvalidationEntityPoint, EntityID: id, EntityCode: before.PointCode,
+			}
+			ids, invErr := s.invalidation.InvalidateForPointTx(tx, id, scope, actor)
+			if invErr != nil {
+				return invErr
+			}
+			invalidatedRunIDs = ids
+		}
+		// 触发实体审计在同事务最后写入，元数据携带级联失效运行 ID，形成双向链路。
+		audit := newAudit(actor, "monitoring_point.updated", "MonitoringPoint", id, before, after, map[string]any{
+			"expected_version":         request.Version,
+			"coordinates_changed":      coordinatesChanged,
+			"background_changed":       backgroundChanged,
+			"invalidation_reason_code": stringOrEmpty(invalidationCode),
+			"invalidated_run_ids":      invalidatedRunIDs,
+		})
+		if txErr := tx.Create(audit).Error; txErr != nil {
+			return fmt.Errorf("audit monitoring point update: %w", txErr)
+		}
+		return nil
+	})
+	if err != nil {
 		return dto.MonitoringPointResponse{}, mapRepositoryError(err, "监测点不存在", "监测点已被其他操作更新，请刷新后重试")
 	}
 	return s.Get(ctx, id)
+}
+
+func stringOrEmpty(code constants.InvalidationReasonCode) string {
+	if code == "" {
+		return ""
+	}
+	return string(code)
 }
 
 func (s *MonitoringPointService) Deactivate(ctx context.Context, id, version uint, actor model.Actor) (dto.MonitoringPointResponse, error) {
@@ -94,8 +147,30 @@ func (s *MonitoringPointService) Deactivate(ctx context.Context, id, version uin
 	after := before
 	after.PointState = string(constants.PointInactive)
 	after.Version = version + 1
-	audit := newAudit(actor, "monitoring_point.deactivated", "MonitoringPoint", id, before, after, map[string]any{"expected_version": version})
-	if err := s.repository.Deactivate(ctx, id, version, audit); err != nil {
+	err = s.transactor.InTx(ctx, func(tx *gorm.DB) error {
+		if txErr := repository.DeactivatePointOnlyTx(tx, id, version); txErr != nil {
+			return txErr
+		}
+		scope := InvalidationScope{
+			ReasonCode: constants.InvalidationReasonPointDeactivated,
+			Reason:     constants.InvalidationReasonMessage(constants.InvalidationReasonPointDeactivated),
+			EntityType: constants.InvalidationEntityPoint, EntityID: id, EntityCode: before.PointCode,
+		}
+		invalidatedRunIDs, invErr := s.invalidation.InvalidateForPointTx(tx, id, scope, actor)
+		if invErr != nil {
+			return invErr
+		}
+		audit := newAudit(actor, "monitoring_point.deactivated", "MonitoringPoint", id, before, after, map[string]any{
+			"expected_version":         version,
+			"invalidation_reason_code": string(constants.InvalidationReasonPointDeactivated),
+			"invalidated_run_ids":      invalidatedRunIDs,
+		})
+		if txErr := tx.Create(audit).Error; txErr != nil {
+			return fmt.Errorf("audit monitoring point deactivation: %w", txErr)
+		}
+		return nil
+	})
+	if err != nil {
 		return dto.MonitoringPointResponse{}, mapRepositoryError(err, "监测点不存在", "监测点状态或版本已变化")
 	}
 	return s.Get(ctx, id)

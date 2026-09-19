@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { MapPin, Plus, RadioTower, RefreshCw } from '@lucide/vue'
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import AppShell from '../components/common/AppShell.vue'
 import OctaveBandChart from '../components/common/OctaveBandChart.vue'
 import PageHeader from '../components/common/PageHeader.vue'
@@ -45,7 +45,16 @@ async function createPoint() {
 }
 
 async function deactivate(item: MonitoringPoint) {
-  try { selected.value = await store.deactivate(item); ElMessage.success('监测点已停用') } catch (error) { ElMessage.error(errorMessage(error)) }
+  try {
+    await ElMessageBox.confirm(
+      `停用 ${item.point_code} 后，引用该点冻结测量的未确认归因运行将在同一事务内自动转为“已失效”，并记录触发来源；已确认结果不受影响。`,
+      '停用监测点将级联失效归因结果',
+      { confirmButtonText: '停用并失效相关运行', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  try { selected.value = await store.deactivate(item); ElMessage.success('监测点已停用，相关未确认归因运行已失效') } catch (error) { ElMessage.error(errorMessage(error)) }
 }
 </script>
 

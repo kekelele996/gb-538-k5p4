@@ -67,18 +67,31 @@ func (r *SourceProfileRepository) Create(ctx context.Context, profile *model.Sou
 
 func (r *SourceProfileRepository) Transition(ctx context.Context, id, expectedVersion uint, from, to string, audit *model.AuditLog) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&model.SourceProfile{}).
-			Where("id = ? AND lock_version = ? AND profile_state = ?", id, expectedVersion, from).
-			Updates(map[string]any{"profile_state": to, "lock_version": gorm.Expr("lock_version + 1"), "updated_at": time.Now().UTC()})
-		if result.Error != nil {
-			return fmt.Errorf("transition source profile: %w", result.Error)
-		}
-		if result.RowsAffected != 1 {
-			return gorm.ErrInvalidData
-		}
-		if err := tx.Create(audit).Error; err != nil {
-			return fmt.Errorf("audit source profile transition: %w", err)
-		}
-		return nil
+		return TransitionSourceProfileTx(tx, id, expectedVersion, from, to, audit)
 	})
+}
+
+// TransitionSourceProfileTx 在调用方事务内执行声源谱条件状态迁移并写入审计。
+func TransitionSourceProfileTx(tx *gorm.DB, id, expectedVersion uint, from, to string, audit *model.AuditLog) error {
+	if err := TransitionSourceProfileOnlyTx(tx, id, expectedVersion, from, to); err != nil {
+		return err
+	}
+	if err := tx.Create(audit).Error; err != nil {
+		return fmt.Errorf("audit source profile transition: %w", err)
+	}
+	return nil
+}
+
+// TransitionSourceProfileOnlyTx 仅做声源谱条件状态迁移，审计由调用方在同事务内补充写入。
+func TransitionSourceProfileOnlyTx(tx *gorm.DB, id, expectedVersion uint, from, to string) error {
+	result := tx.Model(&model.SourceProfile{}).
+		Where("id = ? AND lock_version = ? AND profile_state = ?", id, expectedVersion, from).
+		Updates(map[string]any{"profile_state": to, "lock_version": gorm.Expr("lock_version + 1"), "updated_at": time.Now().UTC()})
+	if result.Error != nil {
+		return fmt.Errorf("transition source profile: %w", result.Error)
+	}
+	if result.RowsAffected != 1 {
+		return gorm.ErrInvalidData
+	}
+	return nil
 }

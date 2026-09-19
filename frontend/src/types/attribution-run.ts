@@ -1,4 +1,5 @@
 import type { AttributionState } from './enums/attribution-state'
+import type { InvalidationReasonCode } from './enums/invalidation'
 
 export interface BandContribution {
   band_hz: number
@@ -28,6 +29,17 @@ export interface AttributionEvidence {
   elapsed_millis: number
 }
 
+export interface RunInvalidation {
+  reason_code: InvalidationReasonCode
+  reason: string
+  trigger_entity_type: string
+  trigger_entity_id: number
+  trigger_entity_code: string
+  invalidated_by: number
+  invalidated_by_name: string
+  invalidated_at: string | null
+}
+
 export interface AttributionRun {
   id: number
   run_code: string
@@ -47,6 +59,7 @@ export interface AttributionRun {
   created_by: number
   reviewed_by: number | null
   review_note: string
+  invalidation?: RunInvalidation | null
   version: number
   created_at: string
   updated_at: string

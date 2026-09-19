@@ -17,6 +17,7 @@ NoiseTrace 面向职业卫生工程师、厂区声学分析员和独立复核人
 - 声源谱：维护设备位置、参考距离、方向性、运行系数和不可变频谱版本。
 - 贡献归因：冻结测量、声源版本、算法版本和输入快照，输出逐频带贡献、总贡献、残差及不可辨识提示。
 - 独立复核：运行发起人不能确认自己的结果；复核与确认使用条件更新，历史结果不可覆盖。
+- 冻结输入失效闭环：监测点坐标或背景谱更新、监测点停用、冻结测量被替代（superseded）、冻结声源谱废止时，引用相关输入的未确认（completed/reviewed）运行在同一事务内自动转为已失效（invalidated），记录触发实体、原因和时间；已确认（confirmed）结果保持不变。失效运行拒绝复核、确认和作废（409），重新计算不复用失效结果，触发审计、失效审计和重算审计保留完整双向链路。
 - 审计中心：每次业务写入在同一数据库事务中保存操作者、request ID、before/after 和算法元数据。
 
 ## 演示账号
@@ -100,7 +101,7 @@ output/
 | `GET /api/v1/audit-logs` | 审计筛选 |
 | `GET /api/v1/meta/enums` | 共享枚举与算法版本 |
 
-归因接口读取 `Idempotency-Key`，但最终防重依据是数据库中的 `input_hash + algorithm_version` 复合唯一约束。同一冻结输入即使更换客户端 key，也会复用原运行。
+归因接口读取 `Idempotency-Key`，但最终防重依据是数据库中只约束未失效运行的 `input_hash + algorithm_version` 部分唯一索引。同一冻结输入即使更换客户端 key，也会复用当前有效运行；一旦运行因冻结输入变化失效，相同输入的重新计算会生成新运行，旧失效结果永不被复用。
 
 ## 算法与可解释证据
 
@@ -144,9 +145,23 @@ captured -> validated -> normalized -> ready -> superseded
 AttributionRun:
 queued -> calculating -> completed -> reviewed -> confirmed
                     \-> failed      \-> voided
+completed/reviewed --(冻结输入变化，系统级联)--> invalidated
 ```
 
-状态更新使用 `id + current_state + version` 条件更新，避免并发先读后写覆盖。业务实体与审计记录在同一事务提交；审计写入失败会回滚业务写入。
+失效闭环触发条件（全部在触发实体的写入事务内提交，任一步失败整体回滚）：
+
+| 触发动作 | 失效原因码 | 匹配范围 |
+| --- | --- | --- |
+| 监测点坐标更新 | `point_coordinates_changed` | 冻结了该点任一测量的未确认运行 |
+| 监测点背景谱更新 | `point_background_changed` | 同上 |
+| 坐标与背景谱同时更新 | `point_inputs_changed` | 同上（只失效一次） |
+| 监测点停用 | `point_deactivated` | 同上 |
+| 测量 `ready -> superseded` | `measurement_superseded` | 冻结了该测量的未确认运行 |
+| 声源谱 `active -> retired` | `source_profile_retired` | 冻结了该谱版本的未确认运行 |
+
+只有 `completed` 与 `reviewed` 运行会被级联失效；`confirmed`、`voided`、`failed` 与已经 `invalidated` 的运行不参与。失效是系统终态，复核、确认和作废都返回 409。触发实体审计携带 `invalidated_run_ids`，每条失效运行审计携带 `trigger_entity_type/id/code`、`reason_code`、操作者与时间；重算完成审计携带 `recomputed_from_invalidated_run_ids`，按相同冻结 ID 集合串联，即使坐标/背景谱变化导致 input_hash 改变也不丢链。
+
+状态更新使用 `id + current_state + version` 条件更新，避免并发先读后写覆盖。业务实体、级联失效与审计记录在同一事务提交；失效或审计写入失败会回滚触发实体的写入。
 
 ## 共享枚举位置
 
@@ -157,11 +172,11 @@ queued -> calculating -> completed -> reviewed -> confirmed
 - 前端定义：`frontend/src/types/enums/measurement-quality.ts`。
 - 前端消费：measurement type/store、`QualityBadge`、监测点/测量/归因页面和枚举测试。
 
-`AttributionState = queued | calculating | completed | failed | reviewed | confirmed | voided`
+`AttributionState = queued | calculating | completed | failed | reviewed | confirmed | voided | invalidated`
 
-- 后端定义：`backend/internal/constants/attribution_state.go`。
-- 后端消费：AttributionRun model/DTO、service 状态机、repository 条件更新、handler/router 和状态测试。
-- 前端定义：`frontend/src/types/enums/attribution-state.ts`。
+- 后端定义：`backend/internal/constants/attribution_state.go`；失效原因码定义：`backend/internal/constants/invalidation.go`。
+- 后端消费：AttributionRun model/DTO、service 状态机与冻结输入失效服务、repository 条件更新与部分唯一索引、handler/router、枚举接口和状态测试。
+- 前端定义：`frontend/src/types/enums/attribution-state.ts`；失效原因/触发来源标签：`frontend/src/types/enums/invalidation.ts`。
 - 前端消费：attribution type/store、`StateBadge`、归因页面、`AttributionDetailDrawer` 和枚举测试。
 
 ## 技术栈
@@ -271,7 +286,7 @@ docker compose down -v --remove-orphans
 
 - `401`：令牌缺失、无效或已过期，重新登录。
 - `403`：当前角色无对应权限；数据分析员不能推进他人导入的测量，运行发起人不能确认自己的结果。
-- `409`：实体状态或乐观锁版本已变化，刷新页面后按最新状态操作。
+- `409`：实体状态或乐观锁版本已变化，刷新页面后按最新状态操作。对已失效（invalidated）归因运行发起复核、确认或作废同样返回 409。
 - `422`：检查 8 个固定频带、背景谱、方向性范围、测量质量和 ready/active 输入状态。
 - 高残差：候选声源不完整、测量条件不一致或背景扣除不可靠；系统不会猜测缺失声源。
 - 不可辨识提示：候选源传播列高度相关，应增加监测点或独立工况，不能只凭当前排序下结论。

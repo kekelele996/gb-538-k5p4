@@ -12,6 +12,7 @@ import { useAttributionRun } from '../hooks/useAttributionRun'
 import { useNoiseMeasurementStore } from '../stores/noise-measurement-store'
 import { useSourceProfileStore } from '../stores/source-profile-store'
 import type { AttributionRun } from '../types/attribution-run'
+import { invalidationReasonLabels, invalidationTriggerTypeLabels } from '../types/enums/invalidation'
 import { fixed, formatDate, shortHash } from '../utils/format'
 
 const { store, canReviewSelected, canConfirmSelected } = useAttributionRun()
@@ -67,6 +68,23 @@ async function confirm() {
       <section class="entity-list"><button v-for="item in store.items" :key="item.id" class="entity-row run-row" :class="{ selected: store.selected?.id === item.id }" @click="selectRun(item)"><span class="run-index">{{ item.id }}</span><span><strong>{{ item.run_code }}</strong><small>{{ formatDate(item.finished_at) }}</small></span><StateBadge :state="item.attribution_state" /></button></section>
       <section v-if="store.selected" class="entity-detail">
         <div class="detail-heading"><div><p class="eyebrow">{{ store.selected.algorithm_version }}</p><h2>{{ store.selected.run_code }}</h2></div><StateBadge :state="store.selected.attribution_state" /></div>
+        <el-alert
+          v-if="store.selected.invalidation"
+          type="error"
+          :closable="false"
+          show-icon
+          class="run-invalidation-alert"
+          :title="`该结果已失效：${invalidationReasonLabels[store.selected.invalidation.reason_code] ?? store.selected.invalidation.reason_code}`"
+        >
+          <div class="run-invalidation-line">
+            <span>触发来源：{{ invalidationTriggerTypeLabels[store.selected.invalidation.trigger_entity_type] ?? store.selected.invalidation.trigger_entity_type }}
+              #{{ store.selected.invalidation.trigger_entity_id }}<template v-if="store.selected.invalidation.trigger_entity_code"> · {{ store.selected.invalidation.trigger_entity_code }}</template>
+            </span>
+            <span>失效时间：{{ formatDate(store.selected.invalidation.invalidated_at) }}</span>
+            <span>操作者：{{ store.selected.invalidation.invalidated_by_name }}</span>
+          </div>
+          <p class="run-invalidation-reason">{{ store.selected.invalidation.reason }}</p>
+        </el-alert>
         <div class="run-summary"><div><span>输入哈希</span><strong :title="store.selected.input_hash">{{ shortHash(store.selected.input_hash) }}</strong></div><div><span>测量 / 声源</span><strong>{{ store.selected.measurement_ids.length }} / {{ store.selected.source_profile_ids.length }}</strong></div><div><span>矩阵</span><strong>{{ store.selected.evidence.matrix_rows }} × {{ store.selected.evidence.matrix_columns }}</strong></div><div><span>迭代</span><strong>{{ store.selected.evidence.iterations }}</strong></div></div>
         <div class="ranking-table"><div class="ranking-head"><span>排名</span><span>候选声源</span><span>总贡献</span><span>预测总级</span></div><div v-for="(source, index) in store.selected.contributions" :key="source.source_profile_id" class="ranking-row"><span>{{ String(index + 1).padStart(2, '0') }}</span><span><strong>{{ source.source_name }}</strong><small>{{ source.source_code }}</small></span><b>{{ fixed(source.contribution_pct, 2) }}%</b><span>{{ fixed(source.overall_db, 2) }} dB</span></div></div>
         <div v-if="store.selected.evidence.warnings.length" class="warning-list"><strong>解释性提示</strong><span v-for="warning in store.selected.evidence.warnings" :key="warning">{{ warning }}</span></div>
