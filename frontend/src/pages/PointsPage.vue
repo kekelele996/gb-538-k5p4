@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { MapPin, Plus, RadioTower, RefreshCw } from '@lucide/vue'
+import { MapPin, Pencil, Plus, RadioTower, RefreshCw } from '@lucide/vue'
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import AppShell from '../components/common/AppShell.vue'
 import OctaveBandChart from '../components/common/OctaveBandChart.vue'
 import PageHeader from '../components/common/PageHeader.vue'
@@ -18,10 +18,15 @@ const store = useMonitoringPointStore()
 const { canWritePoints } = useAuth()
 const selected = ref<MonitoringPoint | null>(null)
 const createOpen = ref(false)
+const editOpen = ref(false)
 const submitting = ref(false)
 const form = reactive<CreateMonitoringPoint>({
   point_code: '', name: '', x_m: 0, y_m: 0, height_m: 1.5, area_type: 'boundary',
   owner_team: 'Occupational Hygiene', background_profile: defaultSpectrum(42),
+})
+const editForm = reactive<Omit<CreateMonitoringPoint, 'point_code'> & { version: number }>({
+  name: '', x_m: 0, y_m: 0, height_m: 1.5, area_type: 'boundary',
+  owner_team: '', background_profile: defaultSpectrum(42), version: 1,
 })
 const metrics = computed(() => ({
   total: store.items.length,
@@ -44,8 +49,39 @@ async function createPoint() {
   } catch (error) { ElMessage.error(errorMessage(error)) } finally { submitting.value = false }
 }
 
+function openEdit(item: MonitoringPoint) {
+  Object.assign(editForm, {
+    name: item.name, x_m: item.x_m, y_m: item.y_m, height_m: item.height_m,
+    area_type: item.area_type, owner_team: item.owner_team, version: item.version,
+    background_profile: { ...item.background_profile },
+  })
+  editOpen.value = true
+}
+
+async function updatePoint() {
+  if (!selected.value) return
+  const before = selected.value
+  const frozenChanged =
+    before.x_m !== editForm.x_m || before.y_m !== editForm.y_m || before.height_m !== editForm.height_m ||
+    JSON.stringify(before.background_profile) !== JSON.stringify(editForm.background_profile)
+  try {
+    const updated = await store.update(before.id, { ...editForm, background_profile: { ...editForm.background_profile } })
+    selected.value = updated; editOpen.value = false
+    ElMessage.success(frozenChanged ? '监测点已更新，相关未确认归因已失效' : '监测点已更新（未变更冻结输入，归因不受影响）')
+  } catch (error) { ElMessage.error(errorMessage(error)) }
+}
+
 async function deactivate(item: MonitoringPoint) {
-  try { selected.value = await store.deactivate(item); ElMessage.success('监测点已停用') } catch (error) { ElMessage.error(errorMessage(error)) }
+  try {
+    await ElMessageBox.confirm(
+      '停用后，所有冻结引用该监测点测量且尚未确认的归因运行将在同一事务内转为“已失效”，并记录触发来源与原因；已确认结果不受影响。',
+      `停用 ${item.point_code}？`,
+      { confirmButtonText: '停用并失效未确认结果', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  try { selected.value = await store.deactivate(item); ElMessage.success('监测点已停用，相关未确认归因已失效') } catch (error) { ElMessage.error(errorMessage(error)) }
 }
 </script>
 
@@ -77,7 +113,10 @@ async function deactivate(item: MonitoringPoint) {
         </dl>
         <div class="section-heading"><h2>背景倍频程</h2><p>固定 63-8000 Hz · dB</p></div>
         <OctaveBandChart :series="[{ name: '背景声级', values: selected.background_profile, color: '#60776a' }]" />
-        <div class="detail-actions" v-if="canWritePoints && selected.point_state === 'active'"><el-button type="danger" plain @click="deactivate(selected)">停用监测点</el-button></div>
+        <div class="detail-actions" v-if="canWritePoints && selected.point_state === 'active'">
+          <el-button :icon="Pencil" @click="openEdit(selected)">编辑坐标 / 背景谱</el-button>
+          <el-button type="danger" plain @click="deactivate(selected)">停用监测点</el-button>
+        </div>
       </section>
     </div>
   </div></AppShell>
@@ -93,5 +132,21 @@ async function deactivate(item: MonitoringPoint) {
       <el-form-item label="责任团队" class="wide"><el-input v-model="form.owner_team" /></el-form-item>
     </div><div class="band-inputs"><el-form-item v-for="band in OCTAVE_BANDS" :key="band" :label="`${band} Hz`"><el-input-number v-model="form.background_profile[String(band)]" :controls="false" :min="0" :max="180" /></el-form-item></div></el-form>
     <template #footer><el-button @click="createOpen = false">取消</el-button><el-button type="primary" :loading="submitting" @click="createPoint">创建</el-button></template>
+  </el-dialog>
+
+  <el-dialog v-model="editOpen" :title="selected ? `编辑 ${selected.point_code}` : '编辑监测点'" width="min(720px, 94vw)" destroy-on-close>
+    <el-alert
+      title="坐标或背景谱属于归因冻结输入：修改保存后，引用该点测量且尚未确认（待复核/已复核）的归因运行将在同一事务内自动失效并记录原因；仅改名称、受声区或责任团队不会触发失效。已确认结果始终不变。"
+      type="warning" :closable="false" show-icon class="edit-freeze-alert"
+    />
+    <el-form label-position="top"><div class="form-grid two">
+      <el-form-item label="名称"><el-input v-model="editForm.name" /></el-form-item>
+      <el-form-item label="受声区"><el-select v-model="editForm.area_type"><el-option label="厂界" value="boundary" /><el-option label="车间" value="workshop" /><el-option label="办公区" value="office" /><el-option label="居住区" value="residential" /></el-select></el-form-item>
+      <el-form-item label="X 坐标（m）"><el-input-number v-model="editForm.x_m" :controls="false" /></el-form-item>
+      <el-form-item label="Y 坐标（m）"><el-input-number v-model="editForm.y_m" :controls="false" /></el-form-item>
+      <el-form-item label="高度（m）"><el-input-number v-model="editForm.height_m" :min="0" :max="100" :step="0.1" /></el-form-item>
+      <el-form-item label="责任团队"><el-input v-model="editForm.owner_team" /></el-form-item>
+    </div><div class="band-inputs"><el-form-item v-for="band in OCTAVE_BANDS" :key="band" :label="`${band} Hz 背景声级`"><el-input-number v-model="editForm.background_profile[String(band)]" :controls="false" :min="0" :max="180" /></el-form-item></div></el-form>
+    <template #footer><el-button @click="editOpen = false">取消</el-button><el-button type="primary" :loading="submitting" @click="updatePoint">保存更新</el-button></template>
   </el-dialog>
 </template>

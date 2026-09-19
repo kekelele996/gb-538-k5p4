@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -22,10 +24,11 @@ type AttributionRunService struct {
 	repository            *repository.AttributionRunRepository
 	measurementRepository *repository.NoiseMeasurementRepository
 	sourceRepository      *repository.SourceProfileRepository
+	supportRepository     *repository.SupportRepository
 }
 
-func NewAttributionRunService(runRepo *repository.AttributionRunRepository, measurementRepo *repository.NoiseMeasurementRepository, sourceRepo *repository.SourceProfileRepository) *AttributionRunService {
-	return &AttributionRunService{repository: runRepo, measurementRepository: measurementRepo, sourceRepository: sourceRepo}
+func NewAttributionRunService(runRepo *repository.AttributionRunRepository, measurementRepo *repository.NoiseMeasurementRepository, sourceRepo *repository.SourceProfileRepository, supportRepo *repository.SupportRepository) *AttributionRunService {
+	return &AttributionRunService{repository: runRepo, measurementRepository: measurementRepo, sourceRepository: sourceRepo, supportRepository: supportRepo}
 }
 
 func (s *AttributionRunService) List(ctx context.Context) ([]dto.AttributionRunResponse, error) {
@@ -35,7 +38,7 @@ func (s *AttributionRunService) List(ctx context.Context) ([]dto.AttributionRunR
 	}
 	result := make([]dto.AttributionRunResponse, 0, len(runs))
 	for _, run := range runs {
-		response, err := attributionResponse(run)
+		response, err := s.attributionResponse(ctx, run)
 		if err != nil {
 			return nil, err
 		}
@@ -49,7 +52,7 @@ func (s *AttributionRunService) Get(ctx context.Context, id uint) (dto.Attributi
 	if err != nil {
 		return dto.AttributionRunResponse{}, mapRepositoryError(err, "归因运行不存在", "归因运行读取冲突")
 	}
-	return attributionResponse(run)
+	return s.attributionResponse(ctx, run)
 }
 
 func (s *AttributionRunService) Create(ctx context.Context, request dto.CreateAttributionRunRequest, actor model.Actor, idempotencyKey string) (dto.AttributionRunResponse, bool, error) {
@@ -89,7 +92,7 @@ func (s *AttributionRunService) Create(ctx context.Context, request dto.CreateAt
 		return dto.AttributionRunResponse{}, false, err
 	}
 	if existing, findErr := s.repository.FindByInput(ctx, inputHash, constants.AlgorithmVersion); findErr == nil {
-		response, responseErr := attributionResponse(existing)
+		response, responseErr := s.attributionResponse(ctx, existing)
 		return response, true, responseErr
 	} else if !repository.IsNotFound(findErr) && !strings.Contains(findErr.Error(), gorm.ErrRecordNotFound.Error()) {
 		return dto.AttributionRunResponse{}, false, findErr
@@ -99,8 +102,12 @@ func (s *AttributionRunService) Create(ctx context.Context, request dto.CreateAt
 		return dto.AttributionRunResponse{}, false, util.Validation("归因算法无法处理当前冻结输入", err)
 	}
 	finished := time.Now().UTC()
+	runCode, err := buildRunCode(inputHash)
+	if err != nil {
+		return dto.AttributionRunResponse{}, false, err
+	}
 	run := model.AttributionRun{
-		RunCode:            "AR-" + strings.ToUpper(inputHash[:10]),
+		RunCode:            runCode,
 		MeasurementIDsJSON: mustJSON(measurementIDs), SourceProfileIDsJSON: mustJSON(sourceIDs),
 		AlgorithmVersion: constants.AlgorithmVersion, InputHash: inputHash,
 		InputSnapshotJSON: string(snapshotJSON), NormalizedBandsJSON: mustJSON(result.NormalizedBands),
@@ -117,7 +124,7 @@ func (s *AttributionRunService) Create(ctx context.Context, request dto.CreateAt
 	})
 	if err := s.repository.CreateCalculated(ctx, &run, audit); err != nil {
 		if existing, findErr := s.repository.FindByInput(ctx, inputHash, constants.AlgorithmVersion); findErr == nil {
-			response, responseErr := attributionResponse(existing)
+			response, responseErr := s.attributionResponse(ctx, existing)
 			return response, true, responseErr
 		}
 		return dto.AttributionRunResponse{}, false, mapRepositoryError(err, "归因运行不存在", "相同冻结输入正在或已经计算")
@@ -134,6 +141,10 @@ func (s *AttributionRunService) Confirm(ctx context.Context, id uint, request dt
 	run, err := s.repository.Get(ctx, id)
 	if err != nil {
 		return dto.AttributionRunResponse{}, mapRepositoryError(err, "归因运行不存在", "归因运行读取冲突")
+	}
+	if constants.AttributionState(run.AttributionState) == constants.AttributionInvalidated {
+		return dto.AttributionRunResponse{}, util.Conflict(
+			"归因结果因冻结输入变更已失效，不能再复核或确认；请基于当前输入重新运行归因", nil)
 	}
 	if run.CreatedBy == actor.ID {
 		return dto.AttributionRunResponse{}, util.Forbidden("归因运行发起人不得确认自己的结果")
@@ -179,6 +190,14 @@ func (s *AttributionRunService) transition(ctx context.Context, id, version uint
 
 func (s *AttributionRunService) transitionLoaded(ctx context.Context, run model.AttributionRun, version uint, to constants.AttributionState, note string, actor model.Actor) (dto.AttributionRunResponse, error) {
 	from := constants.AttributionState(run.AttributionState)
+	if from == constants.AttributionInvalidated {
+		action := "复核或确认"
+		if to == constants.AttributionVoided {
+			action = "作废"
+		}
+		return dto.AttributionRunResponse{}, util.Conflict(
+			fmt.Sprintf("归因结果因冻结输入变更已失效，不能再%s；请基于当前输入重新运行归因", action), nil)
+	}
 	if !constants.CanTransitionAttribution(from, to) {
 		return dto.AttributionRunResponse{}, util.Conflict(fmt.Sprintf("不允许从 %s 迁移到 %s", from, to), nil)
 	}
@@ -241,7 +260,7 @@ func buildSourceInputs(sources []model.SourceProfile) ([]algorithm.SourceInput, 
 	return result, nil
 }
 
-func attributionResponse(run model.AttributionRun) (dto.AttributionRunResponse, error) {
+func (s *AttributionRunService) attributionResponse(ctx context.Context, run model.AttributionRun) (dto.AttributionRunResponse, error) {
 	var measurementIDs, sourceIDs []uint
 	var contributions []dto.SourceContribution
 	var evidence dto.AttributionEvidence
@@ -260,7 +279,7 @@ func attributionResponse(run model.AttributionRun) (dto.AttributionRunResponse, 
 			return dto.AttributionRunResponse{}, fmt.Errorf("decode stored attribution evidence: %w", err)
 		}
 	}
-	return dto.AttributionRunResponse{
+	response := dto.AttributionRunResponse{
 		ID: run.ID, RunCode: run.RunCode, MeasurementIDs: measurementIDs, SourceProfileIDs: sourceIDs,
 		AlgorithmVersion: run.AlgorithmVersion, InputHash: run.InputHash,
 		InputSnapshot: snapshot, NormalizedBands: normalized, Contributions: contributions,
@@ -268,7 +287,17 @@ func attributionResponse(run model.AttributionRun) (dto.AttributionRunResponse, 
 		Explanation: run.Explanation, StartedAt: run.StartedAt, FinishedAt: run.FinishedAt,
 		CreatedBy: run.CreatedBy, ReviewedBy: run.ReviewedBy, ReviewNote: run.ReviewNote,
 		Version: run.Version, CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt,
-	}, nil
+	}
+	if run.AttributionState == string(constants.AttributionInvalidated) && run.InvalidatedAt != nil {
+		response.Invalidation = &dto.Invalidation{
+			At: *run.InvalidatedAt, Reason: run.InvalidationReason,
+			EntityType: run.TriggerEntityType, EntityID: run.TriggerEntityID, EntityCode: run.TriggerEntityCode,
+		}
+		if user, err := s.supportRepository.FindUserByID(ctx, run.InvalidatedBy); err == nil {
+			response.Invalidation.InvalidatedBy = user.DisplayName
+		}
+	}
+	return response, nil
 }
 
 func measurementChecksums(inputs []algorithm.MeasurementInput) []string {
@@ -277,6 +306,18 @@ func measurementChecksums(inputs []algorithm.MeasurementInput) []string {
 		checksums = append(checksums, input.Checksum)
 	}
 	return checksums
+}
+
+// buildRunCode keeps the frozen-input hash readable while appending a random
+// suffix so recomputation after invalidation can coexist with prior runs that
+// carry the identical input_hash. Reuse is governed by the partial unique
+// index, never by the run code.
+func buildRunCode(inputHash string) (string, error) {
+	suffix := make([]byte, 3)
+	if _, err := rand.Read(suffix); err != nil {
+		return "", fmt.Errorf("generate attribution run code: %w", err)
+	}
+	return "AR-" + strings.ToUpper(inputHash[:10]) + "-" + strings.ToUpper(hex.EncodeToString(suffix)), nil
 }
 
 func roundFloat(value float64, places int) float64 {

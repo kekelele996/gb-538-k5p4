@@ -68,7 +68,7 @@ func (r *NoiseMeasurementRepository) Create(ctx context.Context, measurement *mo
 	})
 }
 
-func (r *NoiseMeasurementRepository) Transition(ctx context.Context, id, expectedVersion uint, from, to, quality, reason string, audit *model.AuditLog) error {
+func (r *NoiseMeasurementRepository) Transition(ctx context.Context, id, expectedVersion uint, from, to, quality, reason string, audit *model.AuditLog, invalidate func(*gorm.DB) error) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		updates := map[string]any{
 			"measurement_state": to, "version": gorm.Expr("version + 1"), "updated_at": time.Now().UTC(),
@@ -88,6 +88,11 @@ func (r *NoiseMeasurementRepository) Transition(ctx context.Context, id, expecte
 		}
 		if err := tx.Create(audit).Error; err != nil {
 			return fmt.Errorf("audit measurement transition: %w", err)
+		}
+		if invalidate != nil {
+			if err := invalidate(tx); err != nil {
+				return err
+			}
 		}
 		return nil
 	})

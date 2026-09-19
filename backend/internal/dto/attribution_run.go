@@ -44,6 +44,17 @@ type AttributionEvidence struct {
 	ElapsedMillis   int64    `json:"elapsed_millis"`
 }
 
+// Invalidation describes why and by which frozen entity an unconfirmed run was
+// marked invalidated. Nil for every other terminal or open state.
+type Invalidation struct {
+	At            time.Time `json:"at"`
+	Reason        string    `json:"reason"`
+	EntityType    string    `json:"entity_type"`
+	EntityID      uint      `json:"entity_id"`
+	EntityCode    string    `json:"entity_code"`
+	InvalidatedBy string    `json:"invalidated_by"`
+}
+
 type AttributionRunResponse struct {
 	ID               uint                 `json:"id"`
 	RunCode          string               `json:"run_code"`
@@ -63,6 +74,7 @@ type AttributionRunResponse struct {
 	CreatedBy        uint                 `json:"created_by"`
 	ReviewedBy       *uint                `json:"reviewed_by"`
 	ReviewNote       string               `json:"review_note"`
+	Invalidation     *Invalidation        `json:"invalidation,omitempty"`
 	Version          uint                 `json:"version"`
 	CreatedAt        time.Time            `json:"created_at"`
 	UpdatedAt        time.Time            `json:"updated_at"`

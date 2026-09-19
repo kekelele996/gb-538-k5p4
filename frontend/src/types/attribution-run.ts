@@ -28,6 +28,15 @@ export interface AttributionEvidence {
   elapsed_millis: number
 }
 
+export interface Invalidation {
+  at: string
+  reason: string
+  entity_type: string
+  entity_id: number
+  entity_code: string
+  invalidated_by: string
+}
+
 export interface AttributionRun {
   id: number
   run_code: string
@@ -47,6 +56,7 @@ export interface AttributionRun {
   created_by: number
   reviewed_by: number | null
   review_note: string
+  invalidation?: Invalidation | null
   version: number
   created_at: string
   updated_at: string

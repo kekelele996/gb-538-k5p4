@@ -14,11 +14,12 @@ import (
 )
 
 type SourceProfileService struct {
-	repository *repository.SourceProfileRepository
+	repository    *repository.SourceProfileRepository
+	runRepository *repository.AttributionRunRepository
 }
 
-func NewSourceProfileService(repo *repository.SourceProfileRepository) *SourceProfileService {
-	return &SourceProfileService{repository: repo}
+func NewSourceProfileService(repo *repository.SourceProfileRepository, runRepo *repository.AttributionRunRepository) *SourceProfileService {
+	return &SourceProfileService{repository: repo, runRepository: runRepo}
 }
 
 func (s *SourceProfileService) List(ctx context.Context) ([]dto.SourceProfileResponse, error) {
@@ -82,8 +83,21 @@ func (s *SourceProfileService) Transition(ctx context.Context, id uint, request 
 	}
 	after := before
 	after.ProfileState, after.LockVersion = request.ToState, request.LockVersion+1
-	audit := newAudit(actor, "source_profile.state_changed", "SourceProfile", id, before, after, map[string]any{"from": from, "to": to, "spectrum_version": before.Version})
-	if err := s.repository.Transition(ctx, id, request.LockVersion, string(from), string(to), audit); err != nil {
+	var invalidation *repository.Invalidation
+	if to == constants.ProfileRetired {
+		invalidation = &repository.Invalidation{
+			EntityType: constants.InvalidationEntitySourceProfile, EntityID: id,
+			EntityCode: fmt.Sprintf("%s/V%d", before.SourceCode, before.Version),
+			Reason:     constants.InvalidationReasonSourceRetired, Actor: actor,
+		}
+	}
+	auditMetadata := map[string]any{"from": from, "to": to, "spectrum_version": before.Version}
+	if invalidation != nil {
+		auditMetadata["frozen_runs_invalidated"] = true
+		auditMetadata["invalidation_reason"] = invalidation.Reason
+	}
+	audit := newAudit(actor, "source_profile.state_changed", "SourceProfile", id, before, after, auditMetadata)
+	if err := s.repository.Transition(ctx, id, request.LockVersion, string(from), string(to), audit, s.runRepository.AsTransactionHook(invalidation)); err != nil {
 		return dto.SourceProfileResponse{}, mapRepositoryError(err, "声源谱不存在", "声源谱状态或版本已变化")
 	}
 	return s.Get(ctx, id)

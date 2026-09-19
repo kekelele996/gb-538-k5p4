@@ -16,6 +16,7 @@ NoiseTrace 面向职业卫生工程师、厂区声学分析员和独立复核人
 - 测量工作台：导入八个固定倍频程、生成 SHA-256 checksum、执行质量判定和受控状态迁移。
 - 声源谱：维护设备位置、参考距离、方向性、运行系数和不可变频谱版本。
 - 贡献归因：冻结测量、声源版本、算法版本和输入快照，输出逐频带贡献、总贡献、残差及不可辨识提示。
+- 失效闭环：监测点坐标或背景谱更新、监测点停用、冻结测量被替代（superseded）、冻结声源谱废止后，引用这些输入且尚未确认（completed/reviewed）的归因运行在同一事务内自动转为 `invalidated`，记录触发实体、原因、时间与操作人；已确认结果保持不变。失效结果不可复核、确认或作废（返回 409），重新计算不会复用失效结论，触发与级联审计完整留痕。
 - 独立复核：运行发起人不能确认自己的结果；复核与确认使用条件更新，历史结果不可覆盖。
 - 审计中心：每次业务写入在同一数据库事务中保存操作者、request ID、before/after 和算法元数据。
 
@@ -100,7 +101,7 @@ output/
 | `GET /api/v1/audit-logs` | 审计筛选 |
 | `GET /api/v1/meta/enums` | 共享枚举与算法版本 |
 
-归因接口读取 `Idempotency-Key`，但最终防重依据是数据库中的 `input_hash + algorithm_version` 复合唯一约束。同一冻结输入即使更换客户端 key，也会复用原运行。
+归因接口读取 `Idempotency-Key`，但最终防重依据是数据库中排除 `invalidated` 的 `input_hash + algorithm_version` 部分唯一约束。同一冻结输入即使更换客户端 key，也会复用原运行；但若原运行已因冻结输入变更失效，则不会复用失效结论，而是计算并保存一条新的运行，失效历史仍然保留。
 
 ## 算法与可解释证据
 
@@ -144,9 +145,12 @@ captured -> validated -> normalized -> ready -> superseded
 AttributionRun:
 queued -> calculating -> completed -> reviewed -> confirmed
                     \-> failed      \-> voided
+completed/reviewed --(冻结输入变更，系统级联)--> invalidated
 ```
 
-状态更新使用 `id + current_state + version` 条件更新，避免并发先读后写覆盖。业务实体与审计记录在同一事务提交；审计写入失败会回滚业务写入。
+`invalidated` 是系统控制的终态，只能由冻结输入失效闭环进入，不能经 review/confirm/void 接口迁入或迁出。completed 与 reviewed 是“未确认”状态，会被级联失效；confirmed 结果永久保持不变。重新运行相同冻结输入时，`FindByInput` 与 `(input_hash, algorithm_version)` 部分唯一索引（`WHERE attribution_state <> 'invalidated'`）保证只复用有效运行；失效历史保留为新行，相同输入可重新计算出新结论。
+
+状态更新使用 `id + current_state + version` 条件更新，避免并发先读后写覆盖。业务实体与审计记录在同一事务提交；审计写入失败会回滚业务写入。冻结输入变更触发的运行失效同样挂在触发事务内：监测点/测量/声源谱的写入、受影响运行的逐条失效与 `attribution_run.invalidated` 审计要么全部可见，要么全部回滚。
 
 ## 共享枚举位置
 
@@ -157,7 +161,7 @@ queued -> calculating -> completed -> reviewed -> confirmed
 - 前端定义：`frontend/src/types/enums/measurement-quality.ts`。
 - 前端消费：measurement type/store、`QualityBadge`、监测点/测量/归因页面和枚举测试。
 
-`AttributionState = queued | calculating | completed | failed | reviewed | confirmed | voided`
+`AttributionState = queued | calculating | completed | failed | reviewed | confirmed | voided | invalidated`
 
 - 后端定义：`backend/internal/constants/attribution_state.go`。
 - 后端消费：AttributionRun model/DTO、service 状态机、repository 条件更新、handler/router 和状态测试。
@@ -271,7 +275,7 @@ docker compose down -v --remove-orphans
 
 - `401`：令牌缺失、无效或已过期，重新登录。
 - `403`：当前角色无对应权限；数据分析员不能推进他人导入的测量，运行发起人不能确认自己的结果。
-- `409`：实体状态或乐观锁版本已变化，刷新页面后按最新状态操作。
+- `409`：实体状态或乐观锁版本已变化，刷新页面后按最新状态操作；对已失效运行执行复核、确认或作废也返回 409，需重新运行归因。
 - `422`：检查 8 个固定频带、背景谱、方向性范围、测量质量和 ready/active 输入状态。
 - 高残差：候选声源不完整、测量条件不一致或背景扣除不可靠；系统不会猜测缺失声源。
 - 不可辨识提示：候选源传播列高度相关，应增加监测点或独立工况，不能只凭当前排序下结论。

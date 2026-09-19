@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"industrial-noise-source-attribution/backend/internal/algorithm"
@@ -17,10 +18,11 @@ import (
 type NoiseMeasurementService struct {
 	repository      *repository.NoiseMeasurementRepository
 	pointRepository *repository.MonitoringPointRepository
+	runRepository   *repository.AttributionRunRepository
 }
 
-func NewNoiseMeasurementService(repo *repository.NoiseMeasurementRepository, pointRepo *repository.MonitoringPointRepository) *NoiseMeasurementService {
-	return &NoiseMeasurementService{repository: repo, pointRepository: pointRepo}
+func NewNoiseMeasurementService(repo *repository.NoiseMeasurementRepository, pointRepo *repository.MonitoringPointRepository, runRepo *repository.AttributionRunRepository) *NoiseMeasurementService {
+	return &NoiseMeasurementService{repository: repo, pointRepository: pointRepo, runRepository: runRepo}
 }
 
 func (s *NoiseMeasurementService) List(ctx context.Context) ([]dto.NoiseMeasurementResponse, error) {
@@ -133,11 +135,34 @@ func (s *NoiseMeasurementService) Transition(ctx context.Context, id uint, reque
 	if quality != "" {
 		after.MeasurementQuality, after.QualityReason = quality, reason
 	}
-	audit := newAudit(actor, "noise_measurement.state_changed", "NoiseMeasurement", id, before, after, map[string]any{"from": from, "to": to, "expected_version": request.Version})
-	if err := s.repository.Transition(ctx, id, request.Version, string(from), string(to), quality, reason, audit); err != nil {
+	var invalidation *repository.Invalidation
+	if to == constants.MeasurementSuperseded {
+		invalidation = &repository.Invalidation{
+			EntityType: constants.InvalidationEntityNoiseMeasurement, EntityID: id,
+			EntityCode: measurementEntityCode(before), Reason: constants.InvalidationReasonMeasurementSuperseded, Actor: actor,
+		}
+	}
+	auditMetadata := map[string]any{"from": from, "to": to, "expected_version": request.Version}
+	if invalidation != nil {
+		auditMetadata["frozen_runs_invalidated"] = true
+		auditMetadata["invalidation_reason"] = invalidation.Reason
+	}
+	audit := newAudit(actor, "noise_measurement.state_changed", "NoiseMeasurement", id, before, after, auditMetadata)
+	if err := s.repository.Transition(ctx, id, request.Version, string(from), string(to), quality, reason, audit, s.runRepository.AsTransactionHook(invalidation)); err != nil {
 		return dto.NoiseMeasurementResponse{}, mapRepositoryError(err, "噪声测量不存在", "测量状态或版本已变化")
 	}
 	return s.Get(ctx, id)
+}
+
+func measurementEntityCode(measurement model.NoiseMeasurement) string {
+	if measurement.MonitoringPoint.PointCode != "" {
+		return fmt.Sprintf("%s/M-%d", measurement.MonitoringPoint.PointCode, measurement.ID)
+	}
+	checksum := measurement.SourceChecksum
+	if len(checksum) > 10 {
+		checksum = checksum[:10]
+	}
+	return fmt.Sprintf("M-%d-%s", measurement.ID, strings.ToUpper(checksum))
 }
 
 func classifyMeasurement(bands map[string]float64, overall, background float64, suppliedReason string) (string, string) {

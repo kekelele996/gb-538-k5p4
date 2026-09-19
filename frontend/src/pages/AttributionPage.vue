@@ -12,7 +12,7 @@ import { useAttributionRun } from '../hooks/useAttributionRun'
 import { useNoiseMeasurementStore } from '../stores/noise-measurement-store'
 import { useSourceProfileStore } from '../stores/source-profile-store'
 import type { AttributionRun } from '../types/attribution-run'
-import { fixed, formatDate, shortHash } from '../utils/format'
+import { fixed, formatDate, formatDateTime, shortHash } from '../utils/format'
 
 const { store, canReviewSelected, canConfirmSelected } = useAttributionRun()
 const measurements = useNoiseMeasurementStore()
@@ -59,7 +59,7 @@ async function confirm() {
     <PageHeader eyebrow="NON-NEGATIVE ATTRIBUTION" title="贡献归因" description="冻结 ready 测量与 active 声源版本，输出贡献排序、逐频带证据、残差和不可辨识提示。">
       <el-button :icon="RefreshCw" aria-label="刷新归因运行" @click="store.load" /><el-button v-if="canRun" type="primary" :icon="Play" @click="runOpen = true">运行归因</el-button>
     </PageHeader>
-    <div class="metric-band"><div><span>历史运行</span><strong>{{ store.items.length }}</strong></div><div><span>已确认</span><strong>{{ store.items.filter(x => x.attribution_state === 'confirmed').length }}</strong></div><div><span>当前残差</span><strong>{{ fixed(store.selected?.residual_error, 4) }}</strong></div><div><span>首要来源</span><strong class="source-code">{{ topContribution?.source_code ?? '—' }}</strong></div></div>
+    <div class="metric-band"><div><span>历史运行</span><strong>{{ store.items.length }}</strong></div><div><span>已确认</span><strong>{{ store.items.filter(x => x.attribution_state === 'confirmed').length }}</strong></div><div><span>已失效</span><strong>{{ store.items.filter(x => x.attribution_state === 'invalidated').length }}</strong></div><div><span>当前残差</span><strong>{{ fixed(store.selected?.residual_error, 4) }}</strong></div><div><span>首要来源</span><strong class="source-code">{{ topContribution?.source_code ?? '—' }}</strong></div></div>
     <el-alert v-if="store.error" :title="store.error" type="error" :closable="false" show-icon />
     <el-skeleton v-if="store.loading" :rows="6" animated />
     <div v-else-if="!store.items.length" class="empty-state"><CircleGauge :size="30" /><h2>尚无归因运行</h2><p>选择 ready 测量与 active 声源后执行第一条冻结计算。</p></div>
@@ -68,6 +68,21 @@ async function confirm() {
       <section v-if="store.selected" class="entity-detail">
         <div class="detail-heading"><div><p class="eyebrow">{{ store.selected.algorithm_version }}</p><h2>{{ store.selected.run_code }}</h2></div><StateBadge :state="store.selected.attribution_state" /></div>
         <div class="run-summary"><div><span>输入哈希</span><strong :title="store.selected.input_hash">{{ shortHash(store.selected.input_hash) }}</strong></div><div><span>测量 / 声源</span><strong>{{ store.selected.measurement_ids.length }} / {{ store.selected.source_profile_ids.length }}</strong></div><div><span>矩阵</span><strong>{{ store.selected.evidence.matrix_rows }} × {{ store.selected.evidence.matrix_columns }}</strong></div><div><span>迭代</span><strong>{{ store.selected.evidence.iterations }}</strong></div></div>
+        <el-alert
+          v-if="store.selected.attribution_state === 'invalidated' && store.selected.invalidation"
+          class="detail-invalidation"
+          type="warning"
+          :closable="false"
+          show-icon
+          title="结果已失效：冻结输入在确认前变更，请基于当前输入重新运行"
+        >
+          <div class="detail-invalidation-meta">
+            <span><b>触发来源</b>{{ store.selected.invalidation.entity_code || store.selected.invalidation.entity_type + '#' + store.selected.invalidation.entity_id }}</span>
+            <span><b>时间</b>{{ formatDateTime(store.selected.invalidation.at) }}</span>
+            <span v-if="store.selected.invalidation.invalidated_by"><b>操作人</b>{{ store.selected.invalidation.invalidated_by }}</span>
+          </div>
+          <p>{{ store.selected.invalidation.reason }}</p>
+        </el-alert>
         <div class="ranking-table"><div class="ranking-head"><span>排名</span><span>候选声源</span><span>总贡献</span><span>预测总级</span></div><div v-for="(source, index) in store.selected.contributions" :key="source.source_profile_id" class="ranking-row"><span>{{ String(index + 1).padStart(2, '0') }}</span><span><strong>{{ source.source_name }}</strong><small>{{ source.source_code }}</small></span><b>{{ fixed(source.contribution_pct, 2) }}%</b><span>{{ fixed(source.overall_db, 2) }} dB</span></div></div>
         <div v-if="store.selected.evidence.warnings.length" class="warning-list"><strong>解释性提示</strong><span v-for="warning in store.selected.evidence.warnings" :key="warning">{{ warning }}</span></div>
         <div class="detail-actions"><el-button :icon="Eye" @click="detailOpen = true">计算证据</el-button><el-button v-if="canReviewSelected" type="primary" plain @click="reviewOpen = true">记录复核</el-button><el-button v-if="canConfirmSelected" type="primary" :icon="ShieldCheck" @click="confirm">独立确认</el-button></div>

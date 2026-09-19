@@ -10,6 +10,6 @@ describe('shared domain enums', () => {
   })
 
   it('keeps all immutable attribution lifecycle labels', () => {
-    expect(Object.keys(attributionStateLabels)).toEqual(['queued', 'calculating', 'completed', 'failed', 'reviewed', 'confirmed', 'voided'])
+    expect(Object.keys(attributionStateLabels)).toEqual(['queued', 'calculating', 'completed', 'failed', 'reviewed', 'confirmed', 'voided', 'invalidated'])
   })
 })

@@ -68,12 +68,12 @@ func (r *MonitoringPointRepository) Create(ctx context.Context, point *model.Mon
 	})
 }
 
-func (r *MonitoringPointRepository) Update(ctx context.Context, point *model.MonitoringPoint, expectedVersion uint, audit *model.AuditLog) error {
+func (r *MonitoringPointRepository) Update(ctx context.Context, point *model.MonitoringPoint, expectedVersion uint, audit *model.AuditLog, invalidate func(*gorm.DB) error) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		result := tx.Model(&model.MonitoringPoint{}).
 			Where("id = ? AND version = ? AND point_state = ?", point.ID, expectedVersion, "active").
 			Updates(map[string]any{
-				"name": point.Name, "x_m": point.XM, "y_m": point.YM, "height_m": point.HeightM,
+				"name": point.Name, "xm": point.XM, "ym": point.YM, "height_m": point.HeightM,
 				"area_type": point.AreaType, "background_profile_json": point.BackgroundProfileJSON,
 				"owner_team": point.OwnerTeam, "version": gorm.Expr("version + 1"), "updated_at": time.Now().UTC(),
 			})
@@ -86,11 +86,16 @@ func (r *MonitoringPointRepository) Update(ctx context.Context, point *model.Mon
 		if err := tx.Create(audit).Error; err != nil {
 			return fmt.Errorf("audit monitoring point update: %w", err)
 		}
+		if invalidate != nil {
+			if err := invalidate(tx); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 }
 
-func (r *MonitoringPointRepository) Deactivate(ctx context.Context, id, expectedVersion uint, audit *model.AuditLog) error {
+func (r *MonitoringPointRepository) Deactivate(ctx context.Context, id, expectedVersion uint, audit *model.AuditLog, invalidate func(*gorm.DB) error) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		result := tx.Model(&model.MonitoringPoint{}).
 			Where("id = ? AND version = ? AND point_state = ?", id, expectedVersion, "active").
@@ -103,6 +108,11 @@ func (r *MonitoringPointRepository) Deactivate(ctx context.Context, id, expected
 		}
 		if err := tx.Create(audit).Error; err != nil {
 			return fmt.Errorf("audit monitoring point deactivation: %w", err)
+		}
+		if invalidate != nil {
+			if err := invalidate(tx); err != nil {
+				return err
+			}
 		}
 		return nil
 	})

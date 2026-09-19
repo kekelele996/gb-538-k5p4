@@ -11,6 +11,9 @@ export const useMonitoringPointStore = defineStore('monitoring-points', {
       try { this.items = await monitoringPointApi.list() } catch (error) { this.error = errorMessage(error) } finally { this.loading = false }
     },
     async create(value: CreateMonitoringPoint) { const created = await monitoringPointApi.create(value); await this.load(); return created },
+    async update(id: number, value: Omit<CreateMonitoringPoint, 'point_code'> & { version: number }) {
+      const updated = await monitoringPointApi.update(id, value); await this.load(); return updated
+    },
     async deactivate(item: MonitoringPoint) { const updated = await monitoringPointApi.deactivate(item.id, item.version); await this.load(); return updated },
   },
 })

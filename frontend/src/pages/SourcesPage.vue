@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Factory, Plus, RefreshCw } from '@lucide/vue'
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import AppShell from '../components/common/AppShell.vue'
 import AttributionDetailDrawer from '../components/common/AttributionDetailDrawer.vue'
 import OctaveBandChart from '../components/common/OctaveBandChart.vue'
@@ -40,7 +40,18 @@ async function createProfile() {
 
 async function transition(toState: 'active' | 'retired') {
   if (!selected.value) return
-  try { selected.value = await store.transition(selected.value, toState); ElMessage.success(toState === 'active' ? '声源谱已启用' : '声源谱已废止') }
+  if (toState === 'retired') {
+    try {
+      await ElMessageBox.confirm(
+        '废止后，所有冻结引用该版本且尚未确认的归因运行将在同一事务内转为“已失效”，并记录触发来源与原因；已确认结果不受影响。',
+        `废止 ${selected.value.source_code} V${selected.value.version}？`,
+        { confirmButtonText: '废止并失效未确认结果', cancelButtonText: '取消', type: 'warning' },
+      )
+    } catch {
+      return
+    }
+  }
+  try { selected.value = await store.transition(selected.value, toState); ElMessage.success(toState === 'active' ? '声源谱已启用' : '声源谱已废止，相关未确认归因已失效') }
   catch (error) { ElMessage.error(errorMessage(error)) }
 }
 </script>

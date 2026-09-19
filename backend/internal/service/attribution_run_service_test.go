@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -14,7 +15,8 @@ func TestAttributionResponseKeepsEqualIDArrays(t *testing.T) {
 		ContributionsJSON: "[]", EvidenceJSON: "{}", AttributionState: "completed", StartedAt: time.Now(),
 		CreatedAt: time.Now(), UpdatedAt: time.Now(),
 	}
-	response, err := attributionResponse(run)
+	service := &AttributionRunService{}
+	response, err := service.attributionResponse(context.Background(), run)
 	if err != nil {
 		t.Fatalf("attributionResponse returned error: %v", err)
 	}

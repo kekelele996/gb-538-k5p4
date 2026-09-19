@@ -24,4 +24,24 @@ func TestAttributionStateMachine(t *testing.T) {
 	if CanTransitionAttribution(AttributionConfirmed, AttributionVoided) {
 		t.Fatal("confirmed result must remain immutable")
 	}
+	if CanTransitionAttribution(AttributionInvalidated, AttributionReviewed) {
+		t.Fatal("invalidated result must never return to review")
+	}
+	if CanTransitionAttribution(AttributionInvalidated, AttributionConfirmed) {
+		t.Fatal("invalidated result must never be confirmed")
+	}
+	if CanTransitionAttribution(AttributionInvalidated, AttributionVoided) {
+		t.Fatal("invalidated is a terminal state and must not be manually voided")
+	}
+}
+
+func TestInvalidationOnlyTouchesUnconfirmedRuns(t *testing.T) {
+	for _, state := range InvalidationUnconfirmedStates {
+		if AttributionState(state) == AttributionConfirmed {
+			t.Fatal("confirmed runs must never be invalidated")
+		}
+		if state != string(AttributionCompleted) && state != string(AttributionReviewed) {
+			t.Fatalf("unexpected invalidation target state %q", state)
+		}
+	}
 }

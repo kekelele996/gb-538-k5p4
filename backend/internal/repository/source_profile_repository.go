@@ -65,7 +65,7 @@ func (r *SourceProfileRepository) Create(ctx context.Context, profile *model.Sou
 	})
 }
 
-func (r *SourceProfileRepository) Transition(ctx context.Context, id, expectedVersion uint, from, to string, audit *model.AuditLog) error {
+func (r *SourceProfileRepository) Transition(ctx context.Context, id, expectedVersion uint, from, to string, audit *model.AuditLog, invalidate func(*gorm.DB) error) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		result := tx.Model(&model.SourceProfile{}).
 			Where("id = ? AND lock_version = ? AND profile_state = ?", id, expectedVersion, from).
@@ -78,6 +78,11 @@ func (r *SourceProfileRepository) Transition(ctx context.Context, id, expectedVe
 		}
 		if err := tx.Create(audit).Error; err != nil {
 			return fmt.Errorf("audit source profile transition: %w", err)
+		}
+		if invalidate != nil {
+			if err := invalidate(tx); err != nil {
+				return err
+			}
 		}
 		return nil
 	})

@@ -27,6 +27,16 @@ func (r *SupportRepository) FindUserByUsername(ctx context.Context, username str
 	return user, nil
 }
 
+// FindUserByID returns a user regardless of active flag so invalidation
+// provenance keeps resolving the operator even if the account changes later.
+func (r *SupportRepository) FindUserByID(ctx context.Context, id uint) (model.User, error) {
+	var user model.User
+	if err := r.db.WithContext(ctx).First(&user, id).Error; err != nil {
+		return user, fmt.Errorf("find user by id: %w", err)
+	}
+	return user, nil
+}
+
 func (r *SupportRepository) ListAudits(ctx context.Context, filter AuditFilter) ([]model.AuditLog, error) {
 	query := r.db.WithContext(ctx).Model(&model.AuditLog{})
 	if filter.EntityType != "" {

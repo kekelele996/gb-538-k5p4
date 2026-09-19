@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { Binary, CircleCheck, FileJson, TriangleAlert } from '@lucide/vue'
+import { Binary, CircleCheck, FileJson, Link2Off, TriangleAlert, User } from '@lucide/vue'
 import { computed } from 'vue'
 import type { AttributionRun } from '../../types/attribution-run'
 import type { Spectrum } from '../../types/common'
-import { fixed, shortHash } from '../../utils/format'
+import { fixed, formatDateTime, shortHash } from '../../utils/format'
 import OctaveBandChart from './OctaveBandChart.vue'
 import StateBadge from './StateBadge.vue'
 
@@ -33,6 +33,21 @@ const renderedSnapshot = computed(() => JSON.stringify(props.snapshot ?? props.r
 
     <template v-if="run">
       <div class="explanation-lead"><p>{{ run.explanation }}</p></div>
+      <el-alert
+        v-if="run.attribution_state === 'invalidated' && run.invalidation"
+        class="invalidation-alert"
+        type="warning"
+        :closable="false"
+        show-icon
+        title="该归因结果已失效：冻结输入在确认前发生变更，结论不可再用于复核或确认；请基于当前输入重新运行归因。"
+      >
+        <dl class="invalidation-provenance">
+          <div><dt><Link2Off :size="13" /> 失效原因</dt><dd>{{ run.invalidation.reason }}</dd></div>
+          <div><dt>触发实体</dt><dd><code>{{ run.invalidation.entity_type }}#{{ run.invalidation.entity_id }}</code><span v-if="run.invalidation.entity_code"> · {{ run.invalidation.entity_code }}</span></dd></div>
+          <div><dt>失效时间</dt><dd>{{ formatDateTime(run.invalidation.at) }}</dd></div>
+          <div v-if="run.invalidation.invalidated_by"><dt><User :size="13" /> 触发操作人</dt><dd>{{ run.invalidation.invalidated_by }}</dd></div>
+        </dl>
+      </el-alert>
       <dl class="evidence-grid">
         <div><dt>算法版本</dt><dd>{{ run.algorithm_version }}</dd></div>
         <div><dt>输入哈希</dt><dd class="hash-text" :title="run.input_hash">{{ shortHash(run.input_hash) }}</dd></div>

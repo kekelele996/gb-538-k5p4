@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"time"
 
 	"industrial-noise-source-attribution/backend/internal/algorithm"
@@ -14,11 +15,12 @@ import (
 )
 
 type MonitoringPointService struct {
-	repository *repository.MonitoringPointRepository
+	repository    *repository.MonitoringPointRepository
+	runRepository *repository.AttributionRunRepository
 }
 
-func NewMonitoringPointService(repo *repository.MonitoringPointRepository) *MonitoringPointService {
-	return &MonitoringPointService{repository: repo}
+func NewMonitoringPointService(repo *repository.MonitoringPointRepository, runRepo *repository.AttributionRunRepository) *MonitoringPointService {
+	return &MonitoringPointService{repository: repo, runRepository: runRepo}
 }
 
 func (s *MonitoringPointService) List(ctx context.Context) ([]dto.MonitoringPointResponse, error) {
@@ -79,8 +81,14 @@ func (s *MonitoringPointService) Update(ctx context.Context, id uint, request dt
 	after.AreaType, after.OwnerTeam = request.AreaType, request.OwnerTeam
 	after.BackgroundProfileJSON = mustJSON(request.BackgroundProfile)
 	after.Version = request.Version + 1
-	audit := newAudit(actor, "monitoring_point.updated", "MonitoringPoint", id, before, after, map[string]any{"expected_version": request.Version})
-	if err := s.repository.Update(ctx, &after, request.Version, audit); err != nil {
+	invalidation := s.pointUpdateInvalidation(before, request, actor)
+	auditMetadata := map[string]any{"expected_version": request.Version}
+	if invalidation != nil {
+		auditMetadata["frozen_runs_invalidated"] = true
+		auditMetadata["invalidation_reason"] = invalidation.Reason
+	}
+	audit := newAudit(actor, "monitoring_point.updated", "MonitoringPoint", id, before, after, auditMetadata)
+	if err := s.repository.Update(ctx, &after, request.Version, audit, s.runRepository.AsTransactionHook(invalidation)); err != nil {
 		return dto.MonitoringPointResponse{}, mapRepositoryError(err, "监测点不存在", "监测点已被其他操作更新，请刷新后重试")
 	}
 	return s.Get(ctx, id)
@@ -94,11 +102,42 @@ func (s *MonitoringPointService) Deactivate(ctx context.Context, id, version uin
 	after := before
 	after.PointState = string(constants.PointInactive)
 	after.Version = version + 1
-	audit := newAudit(actor, "monitoring_point.deactivated", "MonitoringPoint", id, before, after, map[string]any{"expected_version": version})
-	if err := s.repository.Deactivate(ctx, id, version, audit); err != nil {
+	invalidation := &repository.Invalidation{
+		EntityType: constants.InvalidationEntityMonitoringPoint, EntityID: id, EntityCode: before.PointCode,
+		Reason: constants.InvalidationReasonPointDeactivated, Actor: actor,
+	}
+	audit := newAudit(actor, "monitoring_point.deactivated", "MonitoringPoint", id, before, after, map[string]any{
+		"expected_version": version, "frozen_runs_invalidated": true,
+		"invalidation_reason": constants.InvalidationReasonPointDeactivated,
+	})
+	if err := s.repository.Deactivate(ctx, id, version, audit, s.runRepository.AsTransactionHook(invalidation)); err != nil {
 		return dto.MonitoringPointResponse{}, mapRepositoryError(err, "监测点不存在", "监测点状态或版本已变化")
 	}
 	return s.Get(ctx, id)
+}
+
+// pointUpdateInvalidation returns the invalidation spec only when a frozen
+// input actually changes: coordinates drive propagation geometry, the
+// background spectrum drives energy subtraction. Renames, area type and owner
+// team do not enter the frozen snapshot and therefore do not invalidate runs.
+func (s *MonitoringPointService) pointUpdateInvalidation(before model.MonitoringPoint, request dto.UpdateMonitoringPointRequest, actor model.Actor) *repository.Invalidation {
+	coordinatesChanged := before.XM != request.XM || before.YM != request.YM || before.HeightM != request.HeightM
+	beforeBackground, decodeErr := decodeSpectrum(before.BackgroundProfileJSON)
+	if decodeErr != nil {
+		coordinatesChanged = true // defensive: treat as a frozen change
+	}
+	backgroundChanged := !reflect.DeepEqual(beforeBackground, request.BackgroundProfile)
+	if !coordinatesChanged && !backgroundChanged {
+		return nil
+	}
+	reason := constants.InvalidationReasonPointBackground
+	if coordinatesChanged {
+		reason = constants.InvalidationReasonPointCoordinates
+	}
+	return &repository.Invalidation{
+		EntityType: constants.InvalidationEntityMonitoringPoint, EntityID: before.ID, EntityCode: before.PointCode,
+		Reason: reason, Actor: actor,
+	}
 }
 
 func (s *MonitoringPointService) toResponse(ctx context.Context, point model.MonitoringPoint) (dto.MonitoringPointResponse, error) {
